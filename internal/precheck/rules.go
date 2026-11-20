@@ -399,7 +399,11 @@ func evalRoles(needed []string, existing map[string]bool) Result {
 }
 
 // evalTargetState checks that s3 is in the state the snapshot stage expects.
-func evalTargetState(tables []catalog.Table, existsOnTarget map[string]bool, skipDDL bool, state *meta.SyncState) Result {
+//
+// With snapshot.skip_ddl the tables have to exist and must be empty: the copy adds the rows of the
+// snapshot to whatever is there, so rows restored from a backup beforehand would be duplicated (or,
+// with a primary key already in place, stop the copy). nonEmpty lists the tables that hold rows.
+func evalTargetState(tables []catalog.Table, existsOnTarget map[string]bool, skipDDL bool, state *meta.SyncState, nonEmpty []string) Result {
 	id := "target.state"
 	if state != nil && state.Stage != meta.StagePrecheck {
 		return pass(id, "migration state found on s3, stage %s (the objects of s3 are managed by this migration)", state.Stage)
@@ -415,8 +419,14 @@ func evalTargetState(tables []catalog.Table, existsOnTarget map[string]bool, ski
 		}
 	}
 	if len(wrong) == 0 {
+		if skipDDL && len(nonEmpty) > 0 {
+			r := fail(id, "gophant copies into empty tables only, the rows would be duplicated: TRUNCATE these tables (or load the schema without data) and run precheck again",
+				"%d table(s) on s3 already contain rows", len(nonEmpty))
+			r.Items = nonEmpty
+			return r
+		}
 		if skipDDL {
-			return pass(id, "every table in scope exists on s3 (snapshot.skip_ddl = true)")
+			return pass(id, "every table in scope exists on s3 and is empty (snapshot.skip_ddl = true)")
 		}
 		return pass(id, "s3 holds none of the tables in scope")
 	}

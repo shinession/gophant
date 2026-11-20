@@ -169,17 +169,25 @@ func TestEvalTargetState(t *testing.T) {
 	tables := []catalog.Table{{Schema: "public", Name: "a"}, {Schema: "public", Name: "b"}}
 
 	// Fresh target: nothing may exist when the schema is imported by gophant.
-	wantSeverity(t, evalTargetState(tables, map[string]bool{}, false, nil), SeverityPass)
-	wantSeverity(t, evalTargetState(tables, map[string]bool{"public.a": true}, false, nil), SeverityFail)
+	wantSeverity(t, evalTargetState(tables, map[string]bool{}, false, nil, nil), SeverityPass)
+	wantSeverity(t, evalTargetState(tables, map[string]bool{"public.a": true}, false, nil, nil), SeverityFail)
 
-	// skip_ddl: everything must exist already.
+	// skip_ddl: everything must exist already, and be empty.
 	both := map[string]bool{"public.a": true, "public.b": true}
-	wantSeverity(t, evalTargetState(tables, both, true, nil), SeverityPass)
-	wantSeverity(t, evalTargetState(tables, map[string]bool{"public.a": true}, true, nil), SeverityFail)
+	wantSeverity(t, evalTargetState(tables, both, true, nil, nil), SeverityPass)
+	wantSeverity(t, evalTargetState(tables, map[string]bool{"public.a": true}, true, nil, nil), SeverityFail)
 
-	// A migration in progress owns the objects of the target.
+	// Rows restored from a backup would be duplicated by the copy: this must be a FAIL that names the tables.
+	r := evalTargetState(tables, both, true, nil, []string{"public.a"})
+	wantSeverity(t, r, SeverityFail)
+	if len(r.Items) != 1 || r.Items[0] != "public.a" || !strings.Contains(r.Summary, "contain rows") {
+		t.Errorf("the tables with rows must be named: %+v", r)
+	}
+
+	// A migration in progress owns the objects of the target, rows included.
 	running := &meta.SyncState{Stage: meta.StageCDCStream}
-	wantSeverity(t, evalTargetState(tables, both, false, running), SeverityPass)
+	wantSeverity(t, evalTargetState(tables, both, false, running, nil), SeverityPass)
+	wantSeverity(t, evalTargetState(tables, both, true, running, []string{"public.a"}), SeverityPass)
 }
 
 func TestEvalTools(t *testing.T) {

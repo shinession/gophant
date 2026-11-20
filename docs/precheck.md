@@ -29,7 +29,7 @@
 | `source.md5_passwords` | | roles with an md5 hash, or `pg_authid` cannot be read |
 | `target.extensions` | an extension of s1 is not available on s3, or lives outside `filter.include_schemas` (pg_dump would not create it), or `skip_ddl` is set and it is not installed | the installed version differs |
 | `target.roles` | a role that owns or is granted an object in scope does not exist on s3 | |
-| `target.state` | s3 already contains a table in scope (`skip_ddl = false`), or lacks one (`skip_ddl = true`); skipped once the migration state exists | |
+| `target.state` | s3 already contains a table in scope (`skip_ddl = false`); or, with `skip_ddl = true`, lacks one or holds rows in one (the copy adds to what is there, so rows restored from a backup would be duplicated); skipped once the migration state exists | |
 | `target.session_role` | the role cannot `SET session_replication_role` | |
 | `target.encoding` | | encoding or collation differ |
 | `tools.pg_dump`, `tools.pg_restore` | not runnable, or older than s1 | not version 18 |
@@ -75,7 +75,7 @@ Run `precheck` before creating the publication. The publication is the point aft
 | `source.md5_passwords` | | 仍使用 md5 哈希的角色，或无法读取 `pg_authid` |
 | `target.extensions` | s1 的扩展在 s3 上不可用、位于 `filter.include_schemas` 之外（pg_dump 不会创建它）、或设置了 `skip_ddl` 而它没有安装 | 已安装的版本不同 |
 | `target.roles` | 在范围内拥有对象或被授权的角色在 s3 上不存在 | |
-| `target.state` | s3 已经包含范围内的表（`skip_ddl = false`），或缺少表（`skip_ddl = true`）；迁移状态存在之后跳过 | |
+| `target.state` | s3 已经包含范围内的表（`skip_ddl = false`）；或在 `skip_ddl = true` 时缺少表、或表里已有数据（拷贝是在已有内容之上追加，从备份恢复出来的行会被重复）；迁移状态存在之后跳过 | |
 | `target.session_role` | 角色无法 `SET session_replication_role` | |
 | `target.encoding` | | 编码或排序规则不同 |
 | `tools.pg_dump`、`tools.pg_restore` | 无法运行，或版本低于 s1 | 不是 18 版本 |

@@ -401,7 +401,25 @@ WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY ($1::text[])`, tableSchemas(e.
 	for _, n := range names {
 		exists[n] = true
 	}
-	return []Result{evalTargetState(e.tables, exists, c.cfg.Snapshot.SkipDDL, e.state)}, nil
+
+	// A schema prepared by hand (skip_ddl) must be empty. Once the migration has started the tables
+	// belong to it and are no longer checked here.
+	var nonEmpty []string
+	if c.cfg.Snapshot.SkipDDL && (e.state == nil || e.state.Stage == meta.StagePrecheck) {
+		for _, t := range e.tables {
+			if !t.IsPhysical() || !exists[t.FullName()] {
+				continue
+			}
+			var hasRows bool
+			if err := c.dst.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM ONLY "+t.Quoted()+")").Scan(&hasRows); err != nil {
+				return nil, fmt.Errorf("look for rows in %s on s3: %w", t.FullName(), err)
+			}
+			if hasRows {
+				nonEmpty = append(nonEmpty, t.FullName())
+			}
+		}
+	}
+	return []Result{evalTargetState(e.tables, exists, c.cfg.Snapshot.SkipDDL, e.state, nonEmpty)}, nil
 }
 
 // ruleTargetPrivileges proves that the target role may use session_replication_role = replica,

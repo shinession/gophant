@@ -28,6 +28,8 @@ host    replication     gophant_repl    <gophant_ip>/32    scram-sha-256
 
 On s3 (PostgreSQL 18): an empty database with the same encoding and collation, the same roles that own or are granted objects on s1 (`pg_dumpall --roles-only`), every extension of s1 available, and a role that is a superuser or may `SET session_replication_role`. The PostgreSQL 18 `pg_dump` and `pg_restore` must be installed where gophant runs; `tools.pg_dump_bin` and `tools.pg_restore_bin` point to them.
 
+Size `max_slot_wal_keep_size` for the whole time until `sync` consumes the slot: the copy, **plus** the post-data import (the indexes are built on s3 before `sync` can start), plus the catch-up. s1 writes WAL for all of that time, and if more than the limit piles up the slot is invalidated (`wal_status = lost`) and the snapshot has to be restarted. Measure the rate of s1 before: read `SELECT wal_bytes FROM pg_stat_wal;` twice, an hour apart, during a busy period. Plan for at least 1.5 to 2 times the expected volume, and keep the limit below the free disk of s1, because the limit only caps what is kept: a disk smaller than the limit fills first. `wal_level = logical` itself writes somewhat more WAL than `replica`.
+
 ### 2. Run it
 
 Passwords belong in environment variables: any `${NAME}` in a string value of the configuration is replaced by that variable, and an unset variable is an error. Start from [configs/gophant.example.yaml](../configs/gophant.example.yaml).
@@ -99,6 +101,14 @@ Global flags: `-c/--config` (default `gophant.yaml`), `--log-level debug|info|wa
 | `verify` found a difference | Do not switch the application. The report names the table and the primary key range. |
 | `--restart` | Drops the slot, truncates the copied tables, resets the state, copies again. It asks for confirmation; `--yes` skips the question. |
 
+### 6. Common questions
+
+**Can I restore a backup of s1 into s3 first and start the replication afterwards?** No, and it is not needed. The copy of `snapshot` is the full restore: it creates the slot, exports a snapshot and copies all tables under that snapshot, in parallel, while s1 stays online. Logical replication can only continue from the position of its slot, so a backup that was restored separately has no position to continue from: if the slot is created after the backup, the changes in between are lost; if it was created before, they arrive twice. With `snapshot.skip_ddl = true` the tables must exist **and be empty**; `precheck` fails on a table that holds rows. If you have to use your own restore procedure, the slot would have to be created first and the dump taken with `pg_dump --snapshot=<exported name>`; gophant has no mode for that yet.
+
+**Where does gophant run, and does s3 have to be in Docker?** No. Docker is only the setup of the end-to-end tests. gophant is one binary without CGo. It runs on any host that can reach s1 (SQL and replication) and s3, and that has the PostgreSQL 18 `pg_dump` and `pg_restore` (set `tools.pg_dump_bin` and `tools.pg_restore_bin` to their paths). The copied rows stream through the gophant process, so the host should have a good link to both servers; the s3 machine itself is the natural choice, which leaves one network hop (s1 to gophant). On s3 allow the gophant host in `pg_hba.conf` and use a superuser (or a role that may `SET session_replication_role`, create extensions and change owners). TLS parameters of the connection strings are passed on to `pg_dump` and `pg_restore` but have not been tested.
+
+**What does the long copy cost s1?** s1 stays writable. During the copy every worker holds a `REPEATABLE READ` transaction, so `VACUUM` cannot remove dead rows that appeared after the snapshot; tables with many updates grow until the copy ends. Every worker also reads from s1, so lower `snapshot.workers` if s1 is busy. The DDL of s1 must not change, and the slot holds back WAL (see section 1).
+
 ---
 
 # 中文
@@ -118,6 +128,8 @@ s1（PostgreSQL 16）上，由 DBA 操作：
 5. 从 `snapshot` 开始到割接结束，冻结 s1 的 DDL。
 
 SQL 和 `pg_hba.conf` 的内容与英文版相同，见上面的代码块。
+
+`max_slot_wal_keep_size` 要按"直到 `sync` 开始消费槽"的整个时长来估算：拷贝时间，**加上** post-data 导入（索引在 s3 上建完之后 `sync` 才能启动），再加上追赶时间。这段时间里 s1 一直在写 WAL，累积量超过上限时槽会失效（`wal_status = lost`），快照必须重做。事先测量 s1 的 WAL 速率：在业务繁忙时段，间隔一小时两次读取 `SELECT wal_bytes FROM pg_stat_wal;`。至少按预计量的 1.5 到 2 倍规划，并让该上限小于 s1 的剩余磁盘，因为上限只是封顶：磁盘比上限小的话，会先写满。`wal_level = logical` 本身产生的 WAL 也比 `replica` 略多。
 
 s3（PostgreSQL 18）上：一个编码和排序规则相同的空数据库；在 s1 上拥有对象或被授权的角色必须已存在（`pg_dumpall --roles-only`）；s1 的所有扩展都可用；角色是超级用户，或被允许 `SET session_replication_role`。运行 gophant 的机器上必须装有 PostgreSQL 18 的 `pg_dump` 和 `pg_restore`，由 `tools.pg_dump_bin` 和 `tools.pg_restore_bin` 指向。
 
@@ -191,3 +203,11 @@ s3（PostgreSQL 18）上：一个编码和排序规则相同的空数据库；�
 | 割接超时 | 信息中给出 lag、打开的写事务数以及 `sync` 是否在运行。阶段保持 `CUTOVER`；修复原因后再次运行 `cutover`。 |
 | `verify` 发现差异 | 不要切换应用。报告会指出表和主键区间。 |
 | `--restart` | 删除槽、清空已拷贝的表、重置状态、重新拷贝。它会请求确认；`--yes` 跳过询问。 |
+
+### 6. 常见问题
+
+**可以先把 s1 的备份恢复到 s3，再开始复制吗？** 不可以，也没有必要。`snapshot` 的拷贝就是全量恢复：它创建槽、导出快照，并在该快照下并发拷贝所有表，期间 s1 保持在线。逻辑复制只能从它的槽的位点继续，单独恢复出来的备份没有可以接续的位点：槽在备份之后创建，中间的变更会丢；槽在备份之前创建，这些变更会到达两次。设置 `snapshot.skip_ddl = true` 时，表必须存在**并且为空**；表里有数据时 `precheck` 会失败。如果必须使用你自己的恢复流程，就得先创建槽，再用 `pg_dump --snapshot=<导出的快照名>` 导出；gophant 目前没有这种模式。
+
+**gophant 在哪里运行？s3 必须在 Docker 里吗？** 不必。Docker 只是端到端测试的搭建方式。gophant 是不依赖 CGo 的单个二进制，可以在任何既能连到 s1（SQL 和复制连接）和 s3、又装有 PostgreSQL 18 的 `pg_dump` 和 `pg_restore` 的机器上运行（把 `tools.pg_dump_bin` 和 `tools.pg_restore_bin` 设置为它们的路径）。拷贝的行会流经 gophant 进程，所以该机器到两台服务器的链路都要好；s3 所在机器是自然的选择，这样只剩一跳网络（s1 到 gophant）。在 s3 上要在 `pg_hba.conf` 中放行 gophant 所在机器，并使用超级用户（或被允许 `SET session_replication_role`、创建扩展、修改 owner 的角色）。连接串里的 TLS 参数会传给 `pg_dump` 和 `pg_restore`，但没有测试过。
+
+**长时间拷贝对 s1 有什么代价？** s1 保持可写。拷贝期间每个 worker 都持有一个 `REPEATABLE READ` 事务，所以 `VACUUM` 无法清理快照之后产生的死行；更新频繁的表会一直膨胀到拷贝结束。每个 worker 也都在读 s1，s1 繁忙时请调低 `snapshot.workers`。s1 的 DDL 不能变化，槽还会拦住 WAL 的回收（见第 1 节）。
