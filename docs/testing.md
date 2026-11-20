@@ -49,7 +49,7 @@ The test builds the `linux/amd64` binary into `bin/`, starts fresh containers an
 
 ### Not covered
 
-TLS connections, other PostgreSQL versions, large data volumes and throughput, a different encoding or collation between s1 and s3, partitioned tables with several levels, `snapshot.skip_ddl = true`, extensions, and tables that use a column type without a binary format.
+TLS connections, other PostgreSQL versions, large data volumes and throughput, a different encoding or collation between s1 and s3, partitioned tables with several levels, `snapshot.skip_ddl = true`, extensions, and tables that use a column type without a binary format. A shutdown, a crash or a rollback of s3 while `sync` runs, and an invalidated slot, were checked by hand only (see section 6 of [operations.md](operations.md)).
 
 ---
 
@@ -101,4 +101,4 @@ TLS connections, other PostgreSQL versions, large data volumes and throughput, a
 
 ### 未覆盖
 
-TLS 连接、其他 PostgreSQL 版本、大数据量和吞吐、s1 与 s3 编码或排序规则不同、多级分区表、`snapshot.skip_ddl = true`、扩展，以及使用没有二进制格式的列类型的表。
+TLS 连接、其他 PostgreSQL 版本、大数据量和吞吐、s1 与 s3 编码或排序规则不同、多级分区表、`snapshot.skip_ddl = true`、扩展，以及使用没有二进制格式的列类型的表。s3 在 `sync` 运行期间关机、崩溃或被回退，以及槽失效，只做过手工检查（见 [operations.md](operations.md) 第 6 节）。
