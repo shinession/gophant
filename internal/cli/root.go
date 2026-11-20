@@ -20,6 +20,8 @@ type options struct {
 	configPath string
 	logLevel   string
 	logFormat  string
+	// databases limits the multi-database mode to the named databases.
+	databases []string
 }
 
 // Execute runs the gophant command line and returns the process exit code.
@@ -48,7 +50,11 @@ func NewRootCommand(version string, stdout, stderr io.Writer) *cobra.Command {
 It copies a consistent snapshot with parallel binary COPY, then replays the logical WAL stream
 (pgoutput) exactly once until the cutover, and finally verifies the result.
 
-Stages: precheck -> snapshot -> sync -> cutover -> verify (status shows the progress at any time).`,
+Stages: precheck -> snapshot -> sync -> cutover -> verify (status shows the progress at any time).
+
+With databases.auto in the configuration every command works on all the databases of s1 instead of
+one: they are found automatically, and "run" does the precheck, the snapshot and the sync of all of
+them in one go. --database limits a command to some of them.`,
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -58,6 +64,8 @@ Stages: precheck -> snapshot -> sync -> cutover -> verify (status shows the prog
 	root.PersistentFlags().StringVarP(&opts.configPath, "config", "c", "gophant.yaml", "path of the YAML configuration file")
 	root.PersistentFlags().StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
 	root.PersistentFlags().StringVar(&opts.logFormat, "log-format", "json", "log format: json or text")
+	root.PersistentFlags().StringArrayVarP(&opts.databases, "database", "d", nil,
+		"with databases.auto: work on this database only (repeat the flag for several)")
 
 	root.AddCommand(
 		newPrecheckCommand(opts),
@@ -66,6 +74,7 @@ Stages: precheck -> snapshot -> sync -> cutover -> verify (status shows the prog
 		newCutoverCommand(opts),
 		newVerifyCommand(opts),
 		newStatusCommand(opts),
+		newRunCommand(opts),
 	)
 	return root
 }

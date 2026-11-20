@@ -30,6 +30,10 @@ Open write transactions can only be detected when the role of the source connect
 
 `gophant status` prints the stage, `consistent_lsn`, `applied_lsn`, the current WAL position of s1, the lag in bytes, the slot (`active`, `wal_status`, retained WAL) and per table: primary key, replica identity, copy status, rows copied, verified. `--json` gives the same as JSON. When s1 cannot be reached it still shows what s3 knows. After the cutover the lag is only informational: `sync` has stopped while s1 keeps writing records of its own.
 
+### Several databases
+
+With `databases.auto` ([multi_database.md](multi_database.md)) the three commands work on every selected database. `cutover` asks once and runs the cutovers of all databases at the same time, and refuses to start while the snapshot of one of them is not finished; a database that is already cut over is skipped. `verify` is `verify.RunStage`, the same function the single-database command calls, once per database. `status` prints one line per database (`--database` shows one in full, `--json` gives a list) and needs s1, because the databases are found there.
+
 ### Lessons learned
 
 * The WAL position of s1 moves by itself after the last transaction (checkpoints, autovacuum; hundreds of kilobytes after a write burst). Waiting for an exact equality at one instant is fragile; the position of the previous poll is a target that does not move.
@@ -69,6 +73,10 @@ Open write transactions can only be detected when the role of the source connect
 ### 状态
 
 `gophant status` 输出阶段、`consistent_lsn`、`applied_lsn`、s1 当前的 WAL 位置、以字节计的 lag、槽（`active`、`wal_status`、保留的 WAL），以及每张表的主键、replica identity、拷贝状态、已拷贝行数和校验结果。`--json` 以 JSON 输出相同内容。无法连接 s1 时，仍会显示 s3 所知道的信息。割接之后 lag 仅供参考：`sync` 已停止，而 s1 仍在写自己的记录。
+
+### 多个数据库
+
+设置 `databases.auto`（[multi_database.md](multi_database.md)）后，这三条命令对每个选中的库工作。`cutover` 只询问一次，同时运行所有库的割接，并且在其中一个库的 snapshot 未完成时拒绝开始；已经割接完成的库会被跳过。`verify` 就是 `verify.RunStage`，即单库命令调用的同一个函数，每个库调用一次。`status` 每个库输出一行（`--database` 完整显示一个库，`--json` 给出列表），并且需要连得上 s1，因为库是在 s1 上发现的。
 
 ### 经验教训
 

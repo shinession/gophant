@@ -23,6 +23,9 @@ import (
 type Options struct {
 	// Restart discards an unfinished or finished snapshot and starts over.
 	Restart bool
+	// SkipPrecheck leaves out the precheck that the stage runs first. The multi-database mode has
+	// just checked every database and must not print a second report for each of them.
+	SkipPrecheck bool
 }
 
 // Runner orchestrates the snapshot stage: precheck, schema import, slot creation, the parallel copy
@@ -59,13 +62,15 @@ func (r *Runner) Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	report, err := precheck.New(r.Cfg, r.Src, r.Dst, r.Logger).Run(ctx)
-	if err != nil {
-		return fmt.Errorf("precheck: %w", err)
-	}
-	report.Print(r.Out)
-	if report.Failed() {
-		return errors.New("the precheck failed: fix the failures above before the snapshot can start")
+	if !opts.SkipPrecheck {
+		report, err := precheck.New(r.Cfg, r.Src, r.Dst, r.Logger).Run(ctx)
+		if err != nil {
+			return fmt.Errorf("precheck: %w", err)
+		}
+		report.Print(r.Out)
+		if report.Failed() {
+			return errors.New("the precheck failed: fix the failures above before the snapshot can start")
+		}
 	}
 
 	switch m {

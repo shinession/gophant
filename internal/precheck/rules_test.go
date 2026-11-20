@@ -110,6 +110,30 @@ func TestEvalPublication(t *testing.T) {
 	}
 }
 
+func TestEvalPublicationMissing(t *testing.T) {
+	// Without the multi-database mode a missing publication is a failure with a statement that fixes it.
+	r := evalPublication("gophant_pub", publicationInfo{})
+	wantSeverity(t, r, SeverityFail)
+	if want := `CREATE PUBLICATION "gophant_pub" FOR ALL TABLES WITH (publish_via_partition_root = true);`; r.Fix != want {
+		t.Errorf("Fix = %q, want %q", r.Fix, want)
+	}
+
+	// When the snapshot stage creates it, the check passes and offers no fix.
+	r = evalPublication("gophant_pub", publicationInfo{WillCreate: true})
+	wantSeverity(t, r, SeverityPass)
+	if r.Fix != "" || !strings.Contains(r.Summary, "creates it") {
+		t.Errorf("unexpected result for a publication that will be created: %+v", r)
+	}
+
+	// A publication that exists but is wrong is never fixed automatically.
+	bad := publicationInfo{Exists: true, AllTables: true, WillCreate: true}
+	r = evalPublication("gophant_pub", bad)
+	wantSeverity(t, r, SeverityFail)
+	if r.Fix != "" {
+		t.Errorf("a wrong publication must not carry a fix: %q", r.Fix)
+	}
+}
+
 func TestEvalSlot(t *testing.T) {
 	tracked := &meta.SyncState{SlotName: "gophant_slot", Stage: meta.StageCDCStream}
 	cases := []struct {
@@ -241,10 +265,25 @@ func TestEvalPrivileges(t *testing.T) {
 }
 
 func TestEvalCapacity(t *testing.T) {
-	wantSeverity(t, evalCapacity(8, 2, 8, 1, false), SeverityPass)
-	wantSeverity(t, evalCapacity(8, 8, 8, 1, false), SeverityFail)
-	wantSeverity(t, evalCapacity(8, 8, 8, 1, true), SeverityPass) // the full slots include ours
-	wantSeverity(t, evalCapacity(8, 1, 8, 8, false), SeverityFail)
+	// One database: a slot and a walsender, or no slot when the database has its own already.
+	wantSeverity(t, evalCapacity(8, 2, 8, 1, 1, 1), SeverityPass)
+	wantSeverity(t, evalCapacity(8, 8, 8, 1, 1, 1), SeverityFail)
+	wantSeverity(t, evalCapacity(8, 8, 8, 1, 0, 1), SeverityPass) // the full slots include ours
+	wantSeverity(t, evalCapacity(8, 1, 8, 8, 1, 1), SeverityFail)
+
+	// The same text as before for one database.
+	if r := evalCapacity(8, 2, 8, 1, 1, 1); strings.Contains(r.Summary, "needs") {
+		t.Errorf("a single database must not mention what the run needs: %s", r.Summary)
+	}
+
+	// Several databases need a slot and a walsender each.
+	wantSeverity(t, evalCapacity(8, 2, 8, 0, 6, 6), SeverityPass)
+	r := evalCapacity(8, 3, 8, 0, 6, 6)
+	wantSeverity(t, r, SeverityFail)
+	if !strings.Contains(r.Summary, "needs 6 more slot(s) and 6 more walsender(s)") {
+		t.Errorf("the failure must say what the run needs: %s", r.Summary)
+	}
+	wantSeverity(t, evalCapacity(8, 0, 8, 3, 5, 6), SeverityFail) // enough slots, too few walsenders
 }
 
 func TestEvalScope(t *testing.T) {
@@ -299,6 +338,28 @@ func TestReportCountsAndPrint(t *testing.T) {
 	}
 	if strings.Contains(out, "hint: do something") == false {
 		t.Errorf("a WARN hint must be printed:\n%s", out)
+	}
+}
+
+func TestPrintResultsCanLeaveOutThePassingChecks(t *testing.T) {
+	results := []Result{
+		pass("a.ok", "fine"),
+		warn("b.warn", "do something", "careful"),
+		fail("c.fail", "fix it", "broken"),
+	}
+	var all, problems bytes.Buffer
+	PrintResults(&all, results, false)
+	PrintResults(&problems, results, true)
+	if !strings.Contains(all.String(), "[PASS] a.ok") {
+		t.Errorf("every result is expected:\n%s", all.String())
+	}
+	if strings.Contains(problems.String(), "a.ok") {
+		t.Errorf("a passing check must be left out:\n%s", problems.String())
+	}
+	for _, want := range []string{"[WARN] b.warn", "[FAIL] c.fail", "hint: fix it"} {
+		if !strings.Contains(problems.String(), want) {
+			t.Errorf("problems must stay, missing %q:\n%s", want, problems.String())
+		}
 	}
 }
 

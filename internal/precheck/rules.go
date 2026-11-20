@@ -11,6 +11,7 @@ import (
 	"github.com/shinession/gophant/internal/config"
 	"github.com/shinession/gophant/internal/format"
 	"github.com/shinession/gophant/internal/meta"
+	"github.com/shinession/gophant/internal/pg"
 )
 
 // This file holds the evaluation half of every check: pure functions that turn facts read from the
@@ -114,14 +115,20 @@ func evalSlotKeepSize(mb int64, allowUnlimited bool) Result {
 		"max_slot_wal_keep_size is %s: a stalled slot could fill the disk of s1", desc)
 }
 
-func evalCapacity(maxSlots, usedSlots, maxSenders, usedSenders int, ownSlot bool) Result {
+// evalCapacity checks that s1 has the slots and walsenders that the run still needs: one of each for a
+// single database, one of each per database that has no slot or no stream yet in the multi-database mode.
+func evalCapacity(maxSlots, usedSlots, maxSenders, usedSenders, needSlots, needSenders int) Result {
 	freeSlots, freeSenders := maxSlots-usedSlots, maxSenders-usedSenders
-	if (freeSlots < 1 && !ownSlot) || freeSenders < 1 {
+	var need string
+	if needSlots > 1 || needSenders > 1 {
+		need = fmt.Sprintf(", this run needs %d more slot(s) and %d more walsender(s)", needSlots, needSenders)
+	}
+	if freeSlots < needSlots || freeSenders < needSenders {
 		return fail("source.replication_capacity",
 			"raise max_replication_slots / max_wal_senders (restart required) or drop an unused slot",
-			"no free replication capacity: slots %d/%d, walsenders %d/%d", usedSlots, maxSlots, usedSenders, maxSenders)
+			"no free replication capacity: slots %d/%d, walsenders %d/%d%s", usedSlots, maxSlots, usedSenders, maxSenders, need)
 	}
-	return pass("source.replication_capacity", "slots %d/%d used, walsenders %d/%d used", usedSlots, maxSlots, usedSenders, maxSenders)
+	return pass("source.replication_capacity", "slots %d/%d used, walsenders %d/%d used%s", usedSlots, maxSlots, usedSenders, maxSenders, need)
 }
 
 // publicationInfo is what pg_publication says about the configured publication.
@@ -131,14 +138,25 @@ type publicationInfo struct {
 	Insert, Update, Delete, Truncate, ViaPartRoot bool
 	// MissingTables are the tables in scope that the publication does not cover.
 	MissingTables []string
+	// WillCreate is set when the snapshot stage creates a missing publication (the multi-database
+	// mode, with a source role that is a superuser).
+	WillCreate bool
+}
+
+// createPublicationSQL is the statement that creates the publication gophant needs.
+func createPublicationSQL(name string) string {
+	return fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES WITH (publish_via_partition_root = true);", pg.Ident(name))
 }
 
 func evalPublication(name string, p publicationInfo) Result {
 	id := "source.publication"
 	if !p.Exists {
-		return fail(id,
-			fmt.Sprintf("as a superuser run: CREATE PUBLICATION %s FOR ALL TABLES WITH (publish_via_partition_root = true);", name),
-			"publication %s does not exist", name)
+		if p.WillCreate {
+			return pass(id, "publication %s does not exist yet, the snapshot stage creates it once the checks above pass", name)
+		}
+		r := fail(id, "as a superuser run: "+createPublicationSQL(name), "publication %s does not exist", name)
+		r.Fix = createPublicationSQL(name)
+		return r
 	}
 	var problems []string
 	if !p.ViaPartRoot {

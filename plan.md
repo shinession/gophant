@@ -2,7 +2,7 @@
 
 ## Implementation plan and status
 
-This is the milestone list of [docs/gophant.md](docs/gophant.md) section 9 with its current state. The state is what has been built and run, not what is intended.
+This is the milestone list of [docs/gophant.md](docs/gophant.md) section 9 with its current state. The state is what has been built and run, not what is intended. Milestone 6 is not part of that specification; it was added in v0.1.5.
 
 | Milestone | Content | State |
 |---|---|---|
@@ -11,6 +11,7 @@ This is the milestone list of [docs/gophant.md](docs/gophant.md) section 9 with 
 | 3. Consistent snapshot | `internal/snapshot` slot with exported snapshot, parallel streaming `COPY`, progress in `gophant_meta`, restart and resume | Done. Run under write load in the end-to-end tests. |
 | 4. WAL replay | `internal/cdc` (decoder, buffer with spill, reader, heartbeat), `internal/applier` (SQL builder and its unit tests, replay, exactly-once), `internal/syncer` | Done. Unit tests pass; interrupted by a dropped connection and by `SIGKILL` in the end-to-end test. |
 | 5. Cutover and verification | `internal/sequence`, `internal/verify`, `gophant status`, `internal/cutover`, the Docker Compose end-to-end tests | Done. The end-to-end tests pass. |
+| 6. Many databases (v0.1.5) | `databases.auto` and `gophant run`: discovery of the databases, one configuration and one slot per database, the combined precheck, creation of the missing databases on s3 and publications on s1, the pipeline, `cutover`, `verify` and `status` for all databases ([docs/multi_database.md](docs/multi_database.md)) | Done. Unit tests pass; run against PostgreSQL 16 and 18 with seven databases in the end-to-end tests. |
 
 Where the implementation differs from the design, and why, is listed in [docs/design_deviations.md](docs/design_deviations.md). The runbook is [docs/operations.md](docs/operations.md).
 
@@ -20,6 +21,7 @@ Where the implementation differs from the design, and why, is listed in [docs/de
 * One table is copied by one stream; a huge table that is not partitioned is not split.
 * Not tested: TLS connections, PostgreSQL versions other than 16 to 18, multi-level partitioning, `snapshot.skip_ddl`, extensions, different encodings or collations.
 * Large objects are not migrated.
+* Multi-database mode: roles are not migrated (the precheck lists the missing ones), the filter is the same for every database, and it was not tested with a database whose locale provider is ICU, with an encoding other than UTF8, or with many more than seven databases.
 
 ---
 
@@ -27,7 +29,7 @@ Where the implementation differs from the design, and why, is listed in [docs/de
 
 ## 实施计划与状态
 
-这是 [docs/gophant.md](docs/gophant.md) 第 9 节的里程碑清单及其当前状态。状态指的是已经构建并运行过的内容，而不是计划。
+这是 [docs/gophant.md](docs/gophant.md) 第 9 节的里程碑清单及其当前状态。状态指的是已经构建并运行过的内容，而不是计划。第 6 个里程碑不在该方案中，是 v0.1.5 加入的。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
@@ -36,6 +38,7 @@ Where the implementation differs from the design, and why, is listed in [docs/de
 | 3. 一致性快照 | `internal/snapshot` 的导出快照建槽、并发流式 `COPY`、`gophant_meta` 中的进度、重启与续跑 | 已完成。在端到端测试中于写入负载下运行过。 |
 | 4. WAL 回放 | `internal/cdc`（解码器、带溢写的缓冲、reader、心跳）、`internal/applier`（SQL 构建及其单元测试、回放、exactly-once）、`internal/syncer` | 已完成。单元测试通过；在端到端测试中被断连和 `SIGKILL` 打断过。 |
 | 5. 割接与校验 | `internal/sequence`、`internal/verify`、`gophant status`、`internal/cutover`、Docker Compose 端到端测试 | 已完成。端到端测试通过。 |
+| 6. 多个数据库（v0.1.5） | `databases.auto` 和 `gophant run`：发现数据库、每个库一份配置和一个槽、合并的预检、创建 s3 上缺少的库和 s1 上缺少的 publication、流水线、对所有库的 `cutover`、`verify` 和 `status`（[docs/multi_database.md](docs/multi_database.md)） | 已完成。单元测试通过；在端到端测试中用七个库对 PostgreSQL 16 和 18 运行过。 |
 
 实现与设计的差异及原因见 [docs/design_deviations.md](docs/design_deviations.md)。运行手册是 [docs/operations.md](docs/operations.md)。
 
@@ -45,3 +48,4 @@ Where the implementation differs from the design, and why, is listed in [docs/de
 * 一张表由一个流拷贝；没有分区的超大表不会被拆分。
 * 未测试：TLS 连接、16 到 18 之外的 PostgreSQL 版本、多级分区、`snapshot.skip_ddl`、扩展、不同的编码或排序规则。
 * 大对象不会被迁移。
+* 多库模式：角色不会被迁移（预检会列出缺少的角色），所有库使用相同的 filter；未测试 locale provider 是 ICU 的库、UTF8 以外的编码，以及库多得多的集群。

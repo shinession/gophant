@@ -17,7 +17,11 @@ indexes and constraints (post-data). The migration then moves to the CDC_STREAM 
 The exported snapshot only lives while this command runs, so an interrupted copy cannot be resumed
 table by table. Use --restart to discard it (the slot is dropped, the copied rows are truncated)
 and start over. A copy that finished but whose post-data import failed is continued by running the
-command again.`,
+command again.
+
+With databases.auto this is done for every selected database, databases.parallel at a time, after
+one precheck of all of them; a database whose snapshot is complete is left alone. Use 'gophant run'
+to also start the streams while the later databases are still being copied.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			env, err := o.setup(cmd)
@@ -25,6 +29,19 @@ command again.`,
 				return err
 			}
 			ctx := cmd.Context()
+
+			if env.cfg.Databases.Auto {
+				fleet, err := o.openFleet(ctx, cmd, env, yes, "gophant-snapshot")
+				if err != nil {
+					return err
+				}
+				defer fleet.Close()
+				return fleet.Snapshot(ctx, restart)
+			}
+			if err := o.requireAuto(env); err != nil {
+				return err
+			}
+
 			p, err := openPools(ctx, env.cfg, "gophant-snapshot")
 			if err != nil {
 				return err

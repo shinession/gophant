@@ -15,7 +15,10 @@ database read-only); gophant does not do that for you. The command then waits un
 everything s1 wrote (lag 0, with no open write transaction on s1), copies the position of every
 sequence to s3 (setval with a safety offset) and moves the migration to the VERIFY stage.
 
-gophant sync must be running: it applies the last transactions and stops by itself afterwards.`,
+gophant sync must be running: it applies the last transactions and stops by itself afterwards.
+
+With databases.auto this is done for all selected databases at the same time, after one question.
+It refuses to start while the snapshot of a selected database is not finished; --database limits it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			env, err := o.setup(cmd)
@@ -23,6 +26,19 @@ gophant sync must be running: it applies the last transactions and stops by itse
 				return err
 			}
 			ctx := cmd.Context()
+
+			if env.cfg.Databases.Auto {
+				fleet, err := o.openFleet(ctx, cmd, env, yes, "gophant-cutover")
+				if err != nil {
+					return err
+				}
+				defer fleet.Close()
+				return fleet.Cutover(ctx)
+			}
+			if err := o.requireAuto(env); err != nil {
+				return err
+			}
+
 			p, err := openPools(ctx, env.cfg, "gophant-cutover")
 			if err != nil {
 				return err

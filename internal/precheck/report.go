@@ -43,11 +43,18 @@ type Result struct {
 	Items []string
 	// Hint tells how to fix a WARN or FAIL.
 	Hint string
+	// Fix is a statement that fixes the problem and can be run as it is, when there is one. The
+	// multi-database report collects them into one script.
+	Fix string
 }
 
 // Report is the ordered list of results of one precheck run.
 type Report struct {
 	Results []Result
+	// Tables is the number of tables in scope and Bytes the size of the ones that hold data. The
+	// multi-database report lists them for every database.
+	Tables int
+	Bytes  int64
 }
 
 // Add appends results.
@@ -76,13 +83,32 @@ func (r *Report) Failed() bool {
 
 // Print writes the human readable report.
 func (r *Report) Print(w io.Writer) {
-	idWidth := 0
-	for _, res := range r.Results {
-		idWidth = max(idWidth, len(res.ID))
-	}
 	fmt.Fprintln(w, "gophant precheck report")
 	fmt.Fprintln(w, strings.Repeat("=", 23))
-	for _, res := range r.Results {
+	PrintResults(w, r.Results, false)
+	pass, warn, fail := r.Counts()
+	fmt.Fprintf(w, "\nSummary: %d passed, %d warning(s), %d failure(s)\n", pass, warn, fail)
+	if fail > 0 {
+		fmt.Fprintln(w, "Result: BLOCKED - fix every FAIL before starting the migration.")
+	} else {
+		fmt.Fprintln(w, "Result: OK - the migration can start.")
+	}
+}
+
+// PrintResults writes one line per result, with the objects and the hint underneath. With onlyProblems
+// the checks that passed are left out. The multi-database report uses it for each of its sections.
+func PrintResults(w io.Writer, results []Result, onlyProblems bool) {
+	idWidth := 0
+	for _, res := range results {
+		if onlyProblems && res.Severity == SeverityPass {
+			continue
+		}
+		idWidth = max(idWidth, len(res.ID))
+	}
+	for _, res := range results {
+		if onlyProblems && res.Severity == SeverityPass {
+			continue
+		}
 		fmt.Fprintf(w, "[%s] %-*s  %s\n", res.Severity, idWidth, res.ID, res.Summary)
 		for i, item := range res.Items {
 			if i == maxItemsShown {
@@ -94,12 +120,5 @@ func (r *Report) Print(w io.Writer) {
 		if res.Hint != "" && res.Severity != SeverityPass {
 			fmt.Fprintf(w, "         hint: %s\n", res.Hint)
 		}
-	}
-	pass, warn, fail := r.Counts()
-	fmt.Fprintf(w, "\nSummary: %d passed, %d warning(s), %d failure(s)\n", pass, warn, fail)
-	if fail > 0 {
-		fmt.Fprintln(w, "Result: BLOCKED - fix every FAIL before starting the migration.")
-	} else {
-		fmt.Fprintln(w, "Result: OK - the migration can start.")
 	}
 }

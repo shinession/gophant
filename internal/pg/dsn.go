@@ -22,6 +22,39 @@ func SplitPassword(dsn string) (stripped, password string, err error) {
 	return splitPasswordKeywords(dsn)
 }
 
+// WithDatabase returns the connection string with its database replaced by name. The multi-database
+// mode derives the connection string of every database from the one that is configured. The result
+// still carries the password, so it must never be logged; use Redact for that.
+//
+// Both the URL form and the keyword/value form are supported. Any database name works: the URL form
+// escapes it and the keyword form quotes it.
+func WithDatabase(dsn, name string) (string, error) {
+	dsn = strings.TrimSpace(dsn)
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			// url.Error echoes the whole input, which contains the password.
+			return "", fmt.Errorf("invalid connection URL")
+		}
+		u.Path = "/" + name
+		u.RawPath = "/" + url.PathEscape(name)
+		return u.String(), nil
+	}
+	pairs, err := parseKeywordValue(dsn)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(pairs)+1)
+	for _, p := range pairs {
+		if p.key == "dbname" {
+			continue
+		}
+		parts = append(parts, p.key+"="+quoteKeywordValue(p.value))
+	}
+	parts = append(parts, "dbname="+quoteKeywordValue(name))
+	return strings.Join(parts, " "), nil
+}
+
 // Redact returns the connection string without its password. It is meant for logs and reports.
 func Redact(dsn string) string {
 	stripped, _, err := SplitPassword(dsn)

@@ -32,12 +32,13 @@
 | B12 | Cutover | gophant does not stop the writes to s1; the operator does, and confirms (or passes `--yes`). The cutover refuses to finish while another session holds a write transaction or a prepared transaction is open (needs `pg_read_all_stats` or a superuser, otherwise it warns), and while no `gophant sync` consumes the slot. |
 | B13 | Safety on start | `sync` refuses to start when the slot of s1 is already beyond the position stored on s3 (s3 lost state), when the slot is invalidated (`wal_status = lost`), or when it does not exist. |
 | B14 | Memory | Transactions that wait for the applier are limited to about twice `cdc.max_tx_memory_mb`; a slow s3 slows the reader instead of exhausting memory. The heartbeat runs in its own goroutine, so a busy applier never causes a walsender timeout. |
+| B15 | Many databases | The specification migrates one database per configuration. With `databases.auto` gophant finds the databases of s1 and runs the stages for each of them, with one derived configuration, one slot (`<source.slot_name>_<database>`) and one `gophant_meta` state per database, and a pipeline (`gophant run`) that streams a database as soon as its own copy is done. It can create the missing databases on s3 and the missing publications on s1 (superuser). Roles and database-level settings are not migrated. See [multi_database.md](multi_database.md). |
 
 ### C. Additions to the project layout and the configuration
 
-* New packages: `internal/catalog` (table, column and type queries), `internal/pg` (connections, DSN handling, error classes), `internal/format`, `internal/syncer` (the `sync` stage), `internal/cutover`, `internal/status`; `test/e2e` (Docker Compose test).
-* New configuration: `precheck.allow_unlimited_slot_wal` (the specification says "unless the configuration explicitly allows it" without naming a key); `source.replication_dsn` is optional; string values may reference environment variables as `${NAME}`; `filter.exclude_tables` takes schema-qualified patterns (`schema.table`, `*` and `?`).
-* New command flags: `snapshot --restart --yes`, `cutover --yes`, `verify --drop-slot --force`, `status --json`, and the global `--log-level` and `--log-format`.
+* New packages: `internal/catalog` (table, column and type queries), `internal/pg` (connections, DSN handling, error classes), `internal/format`, `internal/syncer` (the `sync` stage), `internal/cutover`, `internal/status`, `internal/multidb` (the multi-database mode); `test/e2e` (Docker Compose test).
+* New configuration: `precheck.allow_unlimited_slot_wal` (the specification says "unless the configuration explicitly allows it" without naming a key); `source.replication_dsn` is optional; string values may reference environment variables as `${NAME}`; `filter.exclude_tables` takes schema-qualified patterns (`schema.table`, `*` and `?`); the `databases` section (`auto`, `include`, `exclude`, `parallel`, `create_target`, `create_publication`).
+* New command flags: `snapshot --restart --yes`, `cutover --yes`, `verify --drop-slot --force`, `status --json`, and the global `--log-level`, `--log-format` and `--database` (`-d`); the new command `run`.
 
 ### D. Known limits
 
@@ -82,12 +83,13 @@
 | B12 | 割接 | gophant 不会停止对 s1 的写入，由操作员停止并确认（或传 `--yes`）。如果其他会话还持有写事务、或存在 prepared transaction，割接拒绝完成（需要 `pg_read_all_stats` 或超级用户，否则只给出警告）；没有 `gophant sync` 在消费槽时也会拒绝。 |
 | B13 | 启动安全检查 | 当 s1 上的槽已经超过 s3 上存储的位点（s3 丢失了状态）、槽已失效（`wal_status = lost`）或槽不存在时，`sync` 拒绝启动。 |
 | B14 | 内存 | 等待回放器的事务限制在约两倍的 `cdc.max_tx_memory_mb` 以内；s3 变慢时是 reader 变慢，而不是内存耗尽。心跳运行在独立的 goroutine 中，回放器再忙也不会造成 walsender 超时。 |
+| B15 | 多个数据库 | 设计方案是一份配置迁移一个库。设置 `databases.auto` 后，gophant 会发现 s1 上的数据库并对每个库运行各个阶段：每个库有一份派生的配置、一个槽（`<source.slot_name>_<库名>`）和一份 `gophant_meta` 状态，并提供流水线（`gophant run`），在一个库自己的拷贝完成后立刻开始它的流。它可以创建 s3 上缺少的库和 s1 上缺少的 publication（需要超级用户）。角色和库级别的设置不会迁移。见 [multi_database.md](multi_database.md)。 |
 
 ### C. 项目结构与配置的新增
 
-* 新增 package：`internal/catalog`（表、列、类型查询）、`internal/pg`（连接、DSN 处理、错误分类）、`internal/format`、`internal/syncer`（`sync` 阶段）、`internal/cutover`、`internal/status`；`test/e2e`（Docker Compose 测试）。
-* 新增配置：`precheck.allow_unlimited_slot_wal`（设计方案只写"除非配置显式允许"，没有给出配置项名）；`source.replication_dsn` 可省略；字符串值可用 `${NAME}` 引用环境变量；`filter.exclude_tables` 使用带 schema 的模式（`schema.table`，支持 `*` 和 `?`）。
-* 新增命令参数：`snapshot --restart --yes`、`cutover --yes`、`verify --drop-slot --force`、`status --json`，以及全局的 `--log-level` 和 `--log-format`。
+* 新增 package：`internal/catalog`（表、列、类型查询）、`internal/pg`（连接、DSN 处理、错误分类）、`internal/format`、`internal/syncer`（`sync` 阶段）、`internal/cutover`、`internal/status`、`internal/multidb`（多库模式）；`test/e2e`（Docker Compose 测试）。
+* 新增配置：`precheck.allow_unlimited_slot_wal`（设计方案只写"除非配置显式允许"，没有给出配置项名）；`source.replication_dsn` 可省略；字符串值可用 `${NAME}` 引用环境变量；`filter.exclude_tables` 使用带 schema 的模式（`schema.table`，支持 `*` 和 `?`）；`databases` 配置段（`auto`、`include`、`exclude`、`parallel`、`create_target`、`create_publication`）。
+* 新增命令参数：`snapshot --restart --yes`、`cutover --yes`、`verify --drop-slot --force`、`status --json`，以及全局的 `--log-level`、`--log-format` 和 `--database`（`-d`）；新增命令 `run`。
 
 ### D. 已知限制
 

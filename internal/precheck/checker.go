@@ -25,11 +25,29 @@ type Checker struct {
 	dst    *pgxpool.Pool
 	store  *meta.Store
 	logger *slog.Logger
+	opts   Options
+}
+
+// Options adjusts the checks for one database of the multi-database mode. The zero value is the
+// single-database behaviour.
+type Options struct {
+	// TargetMissing says that the database does not exist on s3 yet. The target pool then points to
+	// another database of s3 and only serves the checks that do not depend on the database; the
+	// checks that look inside the target database see an empty one.
+	TargetMissing bool
+	// CreatePublication says that the snapshot stage creates a missing publication. The check then
+	// passes when the source role may create it.
+	CreatePublication bool
 }
 
 // New returns a checker. The pools are owned by the caller.
 func New(cfg *config.Config, src, dst *pgxpool.Pool, logger *slog.Logger) *Checker {
-	return &Checker{cfg: cfg, src: src, dst: dst, store: meta.NewStore(cfg.Target.MetaSchema), logger: logger}
+	return NewWithOptions(cfg, src, dst, logger, Options{})
+}
+
+// NewWithOptions returns a checker for one database of the multi-database mode.
+func NewWithOptions(cfg *config.Config, src, dst *pgxpool.Pool, logger *slog.Logger, opts Options) *Checker {
+	return &Checker{cfg: cfg, src: src, dst: dst, store: meta.NewStore(cfg.Target.MetaSchema), logger: logger, opts: opts}
 }
 
 // env is the data shared by the rules, read once at the start of a run.
@@ -52,7 +70,12 @@ func (c *Checker) Run(ctx context.Context) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	report := &Report{}
+	report := &Report{Tables: len(e.tables)}
+	for _, t := range e.tables {
+		if t.IsPhysical() {
+			report.Bytes += t.TotalBytes
+		}
+	}
 	for _, r := range c.rules() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -88,8 +111,10 @@ func (c *Checker) load(ctx context.Context) (*env, error) {
 		return nil, fmt.Errorf("source: %w", err)
 	}
 	e.fallbacks = catalog.AssignCopyFormats(e.tables, types)
-	if e.state, err = c.store.GetState(ctx, c.dst); err != nil {
-		return nil, fmt.Errorf("target: %w", err)
+	if !c.opts.TargetMissing {
+		if e.state, err = c.store.GetState(ctx, c.dst); err != nil {
+			return nil, fmt.Errorf("target: %w", err)
+		}
 	}
 	return e, nil
 }
@@ -181,17 +206,30 @@ func (c *Checker) ruleSlotKeepSize(ctx context.Context, _ *env) ([]Result, error
 	return []Result{evalSlotKeepSize(mb, c.cfg.Precheck.AllowUnlimitedSlotWAL)}, nil
 }
 
-func (c *Checker) ruleCapacity(ctx context.Context, e *env) ([]Result, error) {
-	var maxSlots, usedSlots, maxSenders, usedSenders int
-	err := c.src.QueryRow(ctx, `SELECT current_setting('max_replication_slots')::int,
-       (SELECT count(*) FROM pg_replication_slots)::int,
-       current_setting('max_wal_senders')::int,
-       (SELECT count(*) FROM pg_stat_replication)::int`).Scan(&maxSlots, &usedSlots, &maxSenders, &usedSenders)
+func (c *Checker) ruleCapacity(ctx context.Context, _ *env) ([]Result, error) {
+	r, err := CheckCapacity(ctx, c.src, []string{c.cfg.Source.SlotName})
 	if err != nil {
 		return nil, err
 	}
-	ownSlot := e.state != nil && e.state.SlotName == c.cfg.Source.SlotName
-	return []Result{evalCapacity(maxSlots, usedSlots, maxSenders, usedSenders, ownSlot)}, nil
+	return []Result{r}, nil
+}
+
+// CheckCapacity checks that s1 has what a run still needs for the slots with these names: a slot for
+// each one that does not exist yet and a walsender for each one that is not being consumed. The
+// multi-database mode calls it once for all the databases it is going to migrate.
+func CheckCapacity(ctx context.Context, src pg.Querier, slotNames []string) (Result, error) {
+	var maxSlots, usedSlots, maxSenders, usedSenders, ownSlots, ownActive int
+	err := src.QueryRow(ctx, `SELECT current_setting('max_replication_slots')::int,
+       (SELECT count(*) FROM pg_replication_slots)::int,
+       current_setting('max_wal_senders')::int,
+       (SELECT count(*) FROM pg_stat_replication)::int,
+       (SELECT count(*) FROM pg_replication_slots WHERE slot_name = ANY ($1))::int,
+       (SELECT count(*) FROM pg_replication_slots WHERE slot_name = ANY ($1) AND active)::int`, slotNames).
+		Scan(&maxSlots, &usedSlots, &maxSenders, &usedSenders, &ownSlots, &ownActive)
+	if err != nil {
+		return Result{}, err
+	}
+	return evalCapacity(maxSlots, usedSlots, maxSenders, usedSenders, len(slotNames)-ownSlots, len(slotNames)-ownActive), nil
 }
 
 func (c *Checker) rulePublication(ctx context.Context, e *env) ([]Result, error) {
@@ -201,6 +239,13 @@ FROM pg_publication WHERE pubname = $1`, c.cfg.Source.PublicationName).
 		Scan(&p.AllTables, &p.Insert, &p.Update, &p.Delete, &p.Truncate, &p.ViaPartRoot)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
+		if c.opts.CreatePublication {
+			var superuser bool
+			if err := c.src.QueryRow(ctx, `SELECT COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)`).Scan(&superuser); err != nil {
+				return nil, err
+			}
+			p.WillCreate = superuser
+		}
 		return []Result{evalPublication(c.cfg.Source.PublicationName, p)}, nil
 	case err != nil:
 		return nil, err
@@ -322,21 +367,23 @@ FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace ORDER BY e.ext
 	}
 
 	installed := map[string]string{}
-	rows, err = c.dst.Query(ctx, `SELECT extname, extversion FROM pg_extension`)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var name, version string
-		if err := rows.Scan(&name, &version); err != nil {
-			rows.Close()
+	if !c.opts.TargetMissing { // a database that does not exist yet has no extensions
+		rows, err = c.dst.Query(ctx, `SELECT extname, extversion FROM pg_extension`)
+		if err != nil {
 			return nil, err
 		}
-		installed[name] = version
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
+		for rows.Next() {
+			var name, version string
+			if err := rows.Scan(&name, &version); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			installed[name] = version
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	availableNames, err := pg.QueryStrings(ctx, c.dst, `SELECT name FROM pg_available_extensions`)
@@ -390,12 +437,16 @@ ORDER BY 1`, oids, sortedKeys(schemaSet))
 }
 
 func (c *Checker) ruleTargetState(ctx context.Context, e *env) ([]Result, error) {
-	names, err := pg.QueryStrings(ctx, c.dst, `
+	var names []string // a database that does not exist yet has no tables
+	if !c.opts.TargetMissing {
+		var err error
+		names, err = pg.QueryStrings(ctx, c.dst, `
 SELECT n.nspname || '.' || c.relname
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY ($1::text[])`, tableSchemas(e.tables))
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 	exists := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -443,6 +494,10 @@ func (c *Checker) ruleEncoding(ctx context.Context, _ *env) ([]Result, error) {
 	var src, dst dbEncoding
 	if err := c.src.QueryRow(ctx, q).Scan(&src.Encoding, &src.Collate, &src.Ctype); err != nil {
 		return nil, err
+	}
+	if c.opts.TargetMissing {
+		// The snapshot stage creates the database with the settings of s1.
+		return []Result{evalEncoding(src, src)}, nil
 	}
 	if err := c.dst.QueryRow(ctx, q).Scan(&dst.Encoding, &dst.Collate, &dst.Ctype); err != nil {
 		return nil, err

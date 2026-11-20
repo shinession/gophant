@@ -13,6 +13,7 @@ Look a module up here before changing or debugging it, and add every new documen
 | [snapshot.md](snapshot.md) | The `snapshot` stage: slot and exported snapshot, schema import, the parallel copy, restart and resume. |
 | [cdc_applier.md](cdc_applier.md) | The `sync` stage: stream reader, transaction buffer, applier, exactly-once, positions and heartbeat. |
 | [cutover_verify.md](cutover_verify.md) | The `cutover`, `verify` and `status` stages: lag zero, sequences, verification. |
+| [multi_database.md](multi_database.md) | The multi-database mode (`databases.auto`, `gophant run`): finding the databases, one configuration and one slot per database, the combined precheck report, what gophant creates, the WAL that s1 keeps. |
 | [testing.md](testing.md) | Unit tests and the Docker Compose end-to-end tests. |
 
 Documents are bilingual: the complete English version comes first, the complete Simplified Chinese version second.
@@ -34,6 +35,7 @@ Documents are bilingual: the complete English version comes first, the complete 
 | [snapshot.md](snapshot.md) | `snapshot` 阶段：复制槽与导出快照、表结构导入、并发拷贝、重启与续跑。 |
 | [cdc_applier.md](cdc_applier.md) | `sync` 阶段：流读取、事务缓冲、回放器、exactly-once、位点与心跳。 |
 | [cutover_verify.md](cutover_verify.md) | `cutover`、`verify`、`status` 阶段：lag 归零、序列、校验。 |
+| [multi_database.md](multi_database.md) | 多库模式（`databases.auto`、`gophant run`）：发现数据库、每个库一份配置和一个槽、合并的预检报告、gophant 会创建什么、s1 保留的 WAL。 |
 | [testing.md](testing.md) | 单元测试和基于 Docker Compose 的端到端测试。 |
 
 文档为双语：先是完整的英文版，再是完整的简体中文版。

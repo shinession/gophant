@@ -1,0 +1,45 @@
+# gophant configuration of the multi-database end-to-end test. It runs inside the s3 container, so the
+# hosts are the Compose service names. Passwords come from the environment of the exec call.
+#
+# source.dsn and target.dsn name the postgres database: it is only where gophant connects first, the
+# databases themselves are found on s1.
+source:
+  dsn: "postgres://gophant_repl:${GOPHANT_E2E_PASSWORD}@s1:5432/postgres?sslmode=disable"
+  slot_name: "gophant_slot"
+  publication_name: "gophant_pub"
+
+target:
+  dsn: "postgres://postgres:${GOPHANT_E2E_PASSWORD}@127.0.0.1:5432/postgres?sslmode=disable"
+  meta_schema: "gophant_meta"
+
+databases:
+  auto: true
+  parallel: 2
+
+tools:
+  pg_dump_bin: "/usr/lib/postgresql/18/bin/pg_dump"
+  pg_restore_bin: "/usr/lib/postgresql/18/bin/pg_restore"
+
+filter:
+  include_schemas: ["public"]
+  exclude_tables: []
+
+snapshot:
+  workers: 2
+
+cdc:
+  standby_status_interval: "2s"
+  batch_max_txns: 20
+  batch_max_delay: "100ms"
+  max_tx_memory_mb: 1
+  temp_dir: "/tmp/gophant-spill"
+
+cutover:
+  sequence_offset: 100
+  lag_zero_timeout: "${GOPHANT_E2E_LAG_TIMEOUT}"
+
+verify:
+  workers: 2
+  chunk_size: 500
+  mode: "full_hash"
+  sample_ratio: 1.0

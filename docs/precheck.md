@@ -15,8 +15,8 @@
 | `source.read_privilege` | the role cannot `SELECT` a table in scope | |
 | `source.sequence_privilege` | the role cannot read a sequence in scope (`pg_sequences.last_value` would be NULL and the cutover would skip it) | |
 | `source.max_slot_wal_keep_size` | the value is not greater than 0 | it is not, but `precheck.allow_unlimited_slot_wal` is set |
-| `source.replication_capacity` | no free replication slot or walsender | |
-| `source.publication` | it does not exist, `publish_via_partition_root` is off, one of insert/update/delete/truncate is missing, or a table in scope is not covered | |
+| `source.replication_capacity` | no free replication slot or walsender (a slot that exists already, and a slot that is being consumed, need none); in the multi-database mode: not enough for the databases that will be migrated | |
+| `source.publication` | it does not exist (not a failure in the multi-database mode when the snapshot stage creates it), `publish_via_partition_root` is off, one of insert/update/delete/truncate is missing, or a table in scope is not covered | |
 | `source.slot` | the slot exists but this migration does not track it, is invalidated, or uses another plugin; or the slot vanished after the snapshot | |
 | `source.scope` | the filter selects no table | a schema of `filter.include_schemas` does not exist |
 | `source.replica_identity` | UPDATE/DELETE cannot be replicated (no primary key with the default identity, `NOTHING`, `USING INDEX` without index) | `FULL` without a primary key |
@@ -32,15 +32,22 @@
 | `target.state` | s3 already contains a table in scope (`skip_ddl = false`); or, with `skip_ddl = true`, lacks one or holds rows in one (the copy adds to what is there, so rows restored from a backup would be duplicated); skipped once the migration state exists | |
 | `target.session_role` | the role cannot `SET session_replication_role` | |
 | `target.encoding` | | encoding or collation differ |
+| `target.database` (multi-database mode, a database that s3 does not have yet) | `databases.create_target` is `false`, or `snapshot.skip_ddl` is set | the owner of the database does not exist on s3, so the connecting role would own it |
 | `tools.pg_dump`, `tools.pg_restore` | not runnable, or older than s1 | not version 18 |
 
 Run `precheck` before creating the publication. The publication is the point after which UPDATE and DELETE on a table without usable replica identity fail on s1; the hint of `source.replica_identity` says how to fix each table.
+
+### Several databases
+
+The multi-database mode ([multi_database.md](multi_database.md)) runs these rules once for every database and combines the reports. `Checker` takes `Options` for that: `TargetMissing` (the database does not exist on s3 yet: the checks that look inside the target database see an empty one, and the target pool is a connection to another database of s3), and `CreatePublication` (a missing publication is a PASS when the source role is a superuser, because the snapshot stage creates it). A result can carry a `Fix`, a statement that can be run as it is; the combined report collects them into a script. `CheckCapacity` is exported because the combined report evaluates the capacity once for all databases.
 
 ### Lessons learned
 
 * SQL does not promise the order in which `WHERE` conditions are evaluated. `has_sequence_privilege(oid, ...)` raised an error for TOAST tables although the query said `relkind = 'S'`. A `CASE WHEN relkind = 'S' THEN ... END` keeps the order.
 * The role of the tool does not need to be a superuser: `pg_read_all_data` is enough to read the catalogs the checks use, `pg_read_all_stats` is only needed to see other sessions.
 * A rule that cannot run (privileges, a failing query) becomes a FAIL entry with the error, it never silently disappears from the report.
+* The capacity check counts the slots and walsenders of the databases that will be migrated, not of those that were found: a database without a table needs neither, and counting it would fail a cluster with many empty databases for no reason. A slot that exists already and a slot that is being consumed need nothing more.
+* The statement in the hint of `source.publication` quotes the name (`CREATE PUBLICATION "gophant_pub" ...`): unquoted, a name with capital letters would create another publication than the one gophant looks for.
 
 ---
 
@@ -61,8 +68,8 @@ Run `precheck` before creating the publication. The publication is the point aft
 | `source.read_privilege` | 角色无法 `SELECT` 范围内的某张表 | |
 | `source.sequence_privilege` | 角色无法读取范围内的某个序列（`pg_sequences.last_value` 会是 NULL，割接会跳过它） | |
 | `source.max_slot_wal_keep_size` | 值不大于 0 | 值不大于 0，但设置了 `precheck.allow_unlimited_slot_wal` |
-| `source.replication_capacity` | 没有空闲的复制槽或 walsender | |
-| `source.publication` | 不存在、`publish_via_partition_root` 关闭、缺少 insert/update/delete/truncate 之一、或范围内有表未被覆盖 | |
+| `source.replication_capacity` | 没有空闲的复制槽或 walsender（已经存在的槽、以及正在被消费的槽，不再需要）；多库模式下：不够将要迁移的库使用 | |
+| `source.publication` | 不存在（多库模式下，如果由 snapshot 阶段创建，则不算失败）、`publish_via_partition_root` 关闭、缺少 insert/update/delete/truncate 之一、或范围内有表未被覆盖 | |
 | `source.slot` | 槽存在但不是本次迁移跟踪的、已失效或使用其他插件；或快照之后槽消失了 | |
 | `source.scope` | filter 没有选中任何表 | `filter.include_schemas` 中有 schema 不存在 |
 | `source.replica_identity` | UPDATE/DELETE 无法复制（默认 identity 且无主键、`NOTHING`、`USING INDEX` 但没有索引） | 无主键的 `FULL` |
@@ -78,12 +85,19 @@ Run `precheck` before creating the publication. The publication is the point aft
 | `target.state` | s3 已经包含范围内的表（`skip_ddl = false`）；或在 `skip_ddl = true` 时缺少表、或表里已有数据（拷贝是在已有内容之上追加，从备份恢复出来的行会被重复）；迁移状态存在之后跳过 | |
 | `target.session_role` | 角色无法 `SET session_replication_role` | |
 | `target.encoding` | | 编码或排序规则不同 |
+| `target.database`（多库模式，s3 上还没有的库） | `databases.create_target` 为 `false`，或设置了 `snapshot.skip_ddl` | 库的 owner 在 s3 上不存在，会由连接角色拥有 |
 | `tools.pg_dump`、`tools.pg_restore` | 无法运行，或版本低于 s1 | 不是 18 版本 |
 
 请在创建 publication 之前运行 `precheck`。publication 是一个分界点：此后，s1 上对没有可用 replica identity 的表的 UPDATE 和 DELETE 就会失败；`source.replica_identity` 的 hint 说明了每张表怎么修。
+
+### 多个数据库
+
+多库模式（[multi_database.md](multi_database.md)）对每个库运行一遍这些规则，并合并报告。`Checker` 为此接受 `Options`：`TargetMissing`（库在 s3 上还不存在：查看目标库内部的检查会看到一个空库，目标连接池是 s3 另一个库的连接），以及 `CreatePublication`（缺少 publication 时，如果源角色是超级用户，则为 PASS，因为 snapshot 阶段会创建它）。结果可以带一个 `Fix`，即可以原样执行的语句；合并报告把它们收集成一份脚本。`CheckCapacity` 是导出的，因为合并报告对所有库只评估一次容量。
 
 ### 经验教训
 
 * SQL 不保证 `WHERE` 条件的求值顺序。查询里写了 `relkind = 'S'`，`has_sequence_privilege(oid, ...)` 仍然对 TOAST 表报错。用 `CASE WHEN relkind = 'S' THEN ... END` 才能保证顺序。
 * 工具使用的角色不必是超级用户：`pg_read_all_data` 足以读取检查所用的目录表，只有查看其他会话才需要 `pg_read_all_stats`。
 * 无法运行的规则（权限不足、查询失败）会变成带错误信息的 FAIL 条目，不会悄悄从报告里消失。
+* 容量检查统计的是将要迁移的库所需的槽和 walsender，而不是发现的所有库：没有表的库两者都不需要，把它算进去会让一个有很多空库的集群无缘无故地预检失败。已经存在的槽、以及正在被消费的槽，不再需要更多资源。
+* `source.publication` 的 hint 中的语句给名字加了引号（`CREATE PUBLICATION "gophant_pub" ...`）：不加引号的话，带大写字母的名字会创建出另一个 publication，而不是 gophant 要找的那个。

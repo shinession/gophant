@@ -47,7 +47,7 @@ Passwords belong in environment variables: any `${NAME}` in a string value of th
 
 `gophant status -c gophant.yaml [--json]` shows the stage, the lag in bytes, the slot and the progress of every table at any time.
 
-Global flags: `-c/--config` (default `gophant.yaml`), `--log-level debug|info|warn|error`, `--log-format json|text`. Reports go to stdout, logs to stderr.
+Global flags: `-c/--config` (default `gophant.yaml`), `-d/--database <name>` (only with `databases.auto`, repeatable, see section 7), `--log-level debug|info|warn|error`, `--log-format json|text`. Reports go to stdout, logs to stderr.
 
 ### 3. Stages
 
@@ -70,6 +70,10 @@ Global flags: `-c/--config` (default `gophant.yaml`), `--log-level debug|info|wa
 | `source.publication_name` | `gophant_pub` | Must exist on s1. |
 | `target.dsn` | required | Connection to s3. |
 | `target.meta_schema` | `gophant_meta` | Schema of the state tables on s3. |
+| `databases.auto` | `false` | Migrate every database of s1 instead of one, see section 7. |
+| `databases.include`, `databases.exclude` | all found, none | Databases to migrate and never to migrate: names or patterns with `*` and `?`. |
+| `databases.parallel` | 1 | Databases that are snapshotted (and verified) at the same time. |
+| `databases.create_target`, `databases.create_publication` | `true`, `true` | Create a database that s3 lacks, and a publication that s1 lacks (needs a superuser on s1). |
 | `tools.pg_dump_bin`, `tools.pg_restore_bin` | `pg_dump`, `pg_restore` | PostgreSQL 18 client tools. |
 | `filter.include_schemas` | all non-system schemas | Exact schema names. |
 | `filter.exclude_tables` | none | Schema-qualified patterns, for example `public.audit_*`. |
@@ -127,6 +131,24 @@ While s3 is down or being set up, do not change the rows or the columns of the m
 
 Status of the evidence: the shutdown of s3 while `sync` was stopped and while it ran, the `SIGKILL` of `sync` and s3 together under a write load, the refusal after `applied_lsn` was set back (a rolled-back s3, simulated) and the refusal on an invalidated slot were checked by hand on PostgreSQL 16 and 18 servers in Docker on 2026-11-21, and the rows of s3 equalled s1 after the outages. They are not part of the automated end-to-end suite. Not tested: a silent loss of the network (a broken connection is then noticed only by TCP keepalive, which can take minutes) and changes of the s3 settings other than a restart.
 
+### 7. Many databases at once
+
+A cluster with many databases does not need one configuration and one set of commands per database. With `databases.auto: true` gophant finds the databases of s1 and runs the stages for each of them. [multi_database.md](multi_database.md) describes it in full; this is the short way through.
+
+1. **Configuration.** `source.dsn` and `target.dsn` name the `postgres` database (where gophant connects first); add the `databases` section, as in [configs/gophant.example.yaml](../configs/gophant.example.yaml).
+2. **s1.** The `pg_hba.conf` lines of the role say `all` instead of one database name, and there is a line for `replication`. `max_replication_slots` and `max_wal_senders` cover the number of databases and a few more. A publication is needed in every database: gophant creates it when the source role is a superuser, otherwise the DBA runs the script that `precheck` prints.
+3. **s3.** The role is a superuser (or has `CREATEDB` and may `SET session_replication_role`): gophant creates the databases that s3 lacks, with the encoding and collation of s1. The roles that own objects are created once for the whole cluster (`pg_dumpall --roles-only`); `precheck` lists the ones that are missing.
+4. **Run it.**
+
+| Step | Command | What happens |
+|---|---|---|
+| 1 | `gophant precheck -c gophant.yaml` | One report: the checks of the cluster once, then every database (ready, blocked or skipped), and the statements that gophant may not run itself. |
+| 2 | `gophant run -c gophant.yaml` | Creates what is missing, copies the databases (`databases.parallel` at a time) and streams each one as soon as its copy is done. It keeps running. A database with a failed check is skipped after you agreed (`--yes`). |
+| 3 | Stop all writes to s1, then in another terminal `gophant cutover -c gophant.yaml` | All databases are cut over at the same time; `run` ends by itself. |
+| 4 | `gophant verify -c gophant.yaml`, switch the applications, `gophant verify --drop-slot -c gophant.yaml` | As for one database, for every database. |
+
+`gophant status` shows one line per database. `-d <name>` limits any command to some databases, for example to cut over the databases of one application first. After an interruption run `gophant run` again: a database that streams already is not copied again. `gophant snapshot` and `gophant sync` work on all databases as well, if you prefer the steps apart; the slot of the first database then waits for all the others, so size `max_slot_wal_keep_size` as described in [multi_database.md](multi_database.md).
+
 ---
 
 # 中文
@@ -168,7 +190,7 @@ s3（PostgreSQL 18）上：一个编码和排序规则相同的空数据库；�
 
 `gophant status -c gophant.yaml [--json]` 随时显示阶段、以字节计的 lag、槽以及每张表的进度。
 
-全局参数：`-c/--config`（默认 `gophant.yaml`）、`--log-level debug|info|warn|error`、`--log-format json|text`。报告输出到 stdout，日志输出到 stderr。
+全局参数：`-c/--config`（默认 `gophant.yaml`）、`-d/--database <name>`（仅在设置了 `databases.auto` 时有效，可重复，见第 7 节）、`--log-level debug|info|warn|error`、`--log-format json|text`。报告输出到 stdout，日志输出到 stderr。
 
 ### 3. 阶段
 
@@ -191,6 +213,10 @@ s3（PostgreSQL 18）上：一个编码和排序规则相同的空数据库；�
 | `source.publication_name` | `gophant_pub` | 必须已存在于 s1。 |
 | `target.dsn` | 必填 | 连接 s3。 |
 | `target.meta_schema` | `gophant_meta` | s3 上状态表所在的 schema。 |
+| `databases.auto` | `false` | 迁移 s1 的所有数据库，而不是一个，见第 7 节。 |
+| `databases.include`、`databases.exclude` | 发现的全部、无 | 要迁移的库和永不迁移的库：库名或带 `*`、`?` 的模式。 |
+| `databases.parallel` | 1 | 同时做 snapshot（和 verify）的库数。 |
+| `databases.create_target`、`databases.create_publication` | `true`、`true` | 创建 s3 上缺少的库，以及 s1 上缺少的 publication（需要 s1 上的超级用户）。 |
 | `tools.pg_dump_bin`、`tools.pg_restore_bin` | `pg_dump`、`pg_restore` | PostgreSQL 18 客户端工具。 |
 | `filter.include_schemas` | 所有非系统 schema | 精确的 schema 名。 |
 | `filter.exclude_tables` | 无 | 带 schema 的模式，例如 `public.audit_*`。 |
@@ -242,3 +268,21 @@ SQL 与英文版相同，见上面的代码块。
 s3 停机或还在配置期间，不要改动 s3 上已迁移的表的行或列：`sync` 要求 s1 的每一行在 s3 上恰好出现一次，遇到第一个对不上的就会停止（主键重复、UPDATE 找不到行、s3 缺少某一列）。创建角色、安装扩展、修改服务器参数不会触及回放的行；gophant 在 s3 上使用的角色必须保留登录权限和 `SET session_replication_role` 的权限。s3 上请保持 `fsync = on`（默认值）：回放器让每次提交都是持久的（`synchronous_commit = on`），但 `fsync = off`（有时为加快批量导入而关闭）时，s3 崩溃或断电可能丢失 s1 已经确认收到的提交。如果 gophant 运行在 s3 所在机器上，它会随 s3 一起停止，需要再启动。
 
 验证情况：`sync` 停止时和运行时分别让 s3 关机、在写入负载下把 `sync` 和 s3 一起 `SIGKILL`、把 `applied_lsn` 调回去之后的拒绝启动（模拟 s3 被回退）、槽失效时的拒绝启动，这几项于 2026-11-21 在 Docker 中的 PostgreSQL 16 和 18 服务器上手工检查过，停机之后 s3 的数据行与 s1 一致。它们不属于自动化的端到端测试套件。未测试：网络静默中断（断开的连接只能靠 TCP keepalive 发现，可能需要几分钟），以及重启以外的 s3 参数修改。
+
+### 7. 一次迁移多个数据库
+
+有很多数据库的集群，不需要每个库一份配置和一套命令。设置 `databases.auto: true` 之后，gophant 会发现 s1 上的数据库，并对每个库运行各个阶段。完整说明见 [multi_database.md](multi_database.md)；这里是简短的走法。
+
+1. **配置。** `source.dsn` 和 `target.dsn` 写 `postgres` 库（gophant 最先连接的库）；加上 `databases` 配置段，写法见 [configs/gophant.example.yaml](../configs/gophant.example.yaml)。
+2. **s1。** 角色的 `pg_hba.conf` 条目写 `all` 而不是某一个库名，并有一条 `replication` 的条目。`max_replication_slots` 和 `max_wal_senders` 要覆盖库的数量再多几个。每个库都需要一个 publication：源角色是超级用户时由 gophant 创建，否则由 DBA 执行 `precheck` 打印的脚本。
+3. **s3。** 角色是超级用户（或有 `CREATEDB` 并且可以 `SET session_replication_role`）：s3 上缺少的库由 gophant 创建，使用 s1 的编码和排序规则。拥有对象的角色对整个集群只需创建一次（`pg_dumpall --roles-only`）；`precheck` 会列出缺少的角色。
+4. **执行。**
+
+| 步骤 | 命令 | 发生什么 |
+|---|---|---|
+| 1 | `gophant precheck -c gophant.yaml` | 一份报告：集群的检查只显示一次，然后是每个库（ready、blocked 或 skipped），以及 gophant 不允许自己执行的语句。 |
+| 2 | `gophant run -c gophant.yaml` | 创建缺少的东西，拷贝各个库（同时做 `databases.parallel` 个），每个库一拷完就开始它的流。它持续运行。检查失败的库在你同意之后（`--yes`）被跳过。 |
+| 3 | 停止对 s1 的所有写入，然后在另一个终端运行 `gophant cutover -c gophant.yaml` | 所有库同时割接；`run` 会自行结束。 |
+| 4 | `gophant verify -c gophant.yaml`，切换应用，`gophant verify --drop-slot -c gophant.yaml` | 与单库相同，对每个库执行。 |
+
+`gophant status` 每个库显示一行。`-d <name>` 把任何命令限定在某几个库上，例如先割接某个应用的库。中断之后再运行一次 `gophant run`：已经在流的库不会被重新拷贝。如果你想把各步分开，`gophant snapshot` 和 `gophant sync` 同样对所有库工作；这时第一个库的槽要等其他所有库，所以请按 [multi_database.md](multi_database.md) 中的说明估算 `max_slot_wal_keep_size`。

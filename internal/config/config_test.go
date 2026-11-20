@@ -165,6 +165,103 @@ func TestExampleConfigurationIsValid(t *testing.T) {
 	}
 }
 
+func TestDatabasesDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	d := &cfg.Databases
+	if d.Auto {
+		t.Error("the multi-database mode must be off unless it is asked for")
+	}
+	if d.Parallel != 1 || !d.CreatesTarget() || !d.CreatesPublication() {
+		t.Errorf("defaults wrong: parallel=%d create_target=%v create_publication=%v", d.Parallel, d.CreatesTarget(), d.CreatesPublication())
+	}
+	if !d.Matches("anything") {
+		t.Error("without include and exclude every database matches")
+	}
+}
+
+func TestDatabasesSection(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML + `
+databases:
+  auto: true
+  include: ["app*", "Sales-2024", "crm"]
+  exclude: ["app_test*", "crm"]
+  parallel: 3
+  create_target: false
+  create_publication: false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	d := &cfg.Databases
+	if !d.Auto || d.Parallel != 3 || d.CreatesTarget() || d.CreatesPublication() {
+		t.Errorf("explicit values were not kept: %+v", d)
+	}
+	cases := map[string]bool{
+		"appdb":      true,
+		"app":        true,  // * matches empty
+		"app_test1":  false, // exclusion wins over inclusion
+		"Sales-2024": true,
+		"sales-2024": false, // matching is case sensitive
+		"crm":        false, // excluded although included
+		"postgres":   false, // not in the include list
+	}
+	for name, want := range cases {
+		if got := d.Matches(name); got != want {
+			t.Errorf("Matches(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestDatabasesExcludeOnlyKeepsTheRest(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML + "databases:\n  auto: true\n  exclude: [\"postgres\", \"tmp_?\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for name, want := range map[string]bool{"appdb": true, "postgres": false, "tmp_1": false, "tmp_12": true} {
+		if got := cfg.Databases.Matches(name); got != want {
+			t.Errorf("Matches(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestDatabasesValidation(t *testing.T) {
+	long := strings.Repeat("s", maxMultiSlotBase+1)
+	_, err := Parse([]byte(`
+source:
+  dsn: "postgres://u:p@s1:5432/postgres"
+  slot_name: "` + long + `"
+target:
+  dsn: "postgres://u:p@s3:5432/postgres"
+databases:
+  auto: true
+  parallel: -2
+  include: [""]
+  exclude: [""]
+`))
+	if err == nil {
+		t.Fatal("expected validation errors")
+	}
+	for _, want := range []string{"databases.parallel", "databases.include", "databases.exclude", "source.slot_name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
+	}
+
+	// The slot name only has to leave room for the database name when the mode is on.
+	if _, err := Parse([]byte(`
+source:
+  dsn: "postgres://u:p@s1:5432/appdb"
+  slot_name: "` + long + `"
+target:
+  dsn: "postgres://u:p@s3:5432/appdb"
+`)); err != nil {
+		t.Errorf("a long slot name is fine for one database: %v", err)
+	}
+}
+
 func TestFilterWithoutIncludeSchemasMatchesEverything(t *testing.T) {
 	cfg, err := Parse([]byte(minimalYAML))
 	if err != nil {

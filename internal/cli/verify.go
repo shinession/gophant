@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
-	"github.com/shinession/gophant/internal/meta"
-	"github.com/shinession/gophant/internal/snapshot"
 	"github.com/shinession/gophant/internal/verify"
 	"github.com/spf13/cobra"
 )
@@ -20,7 +17,10 @@ fingerprints of primary key ranges, all of them or a sample. Run it after the cu
 still write-stopped; during a live migration differences are expected.
 
 With --drop-slot the replication slot of s1 is dropped after a successful verification, which
-releases the WAL that s1 keeps for it. Switch the application to s3 before or right after.`,
+releases the WAL that s1 keeps for it. Switch the application to s3 before or right after.
+
+With databases.auto every selected database is verified (--database limits the list), one after the
+other, or databases.parallel at a time.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			env, err := o.setup(cmd)
@@ -28,54 +28,28 @@ releases the WAL that s1 keeps for it. Switch the application to s3 before or ri
 				return err
 			}
 			ctx := cmd.Context()
-			src, dst, err := verify.OpenPools(ctx, env.cfg)
-			if err != nil {
-				return err
-			}
-			defer src.Close()
-			defer dst.Close()
+			opts := verify.StageOptions{DropSlot: dropSlot, Force: force}
 
-			store := meta.NewStore(env.cfg.Target.MetaSchema)
-			state, err := store.GetState(ctx, dst)
-			if err != nil {
+			if env.cfg.Databases.Auto {
+				fleet, err := o.openFleet(ctx, cmd, env, false, "gophant-verify")
+				if err != nil {
+					return err
+				}
+				defer fleet.Close()
+				return fleet.Verify(ctx, opts, o.configPath)
+			}
+			if err := o.requireAuto(env); err != nil {
 				return err
-			}
-			if state == nil {
-				return errors.New("no migration state found on s3: nothing to verify")
-			}
-			rehearsal := state.Stage != meta.StageVerify && state.Stage != meta.StageDone
-			if rehearsal && !force {
-				return fmt.Errorf("the migration is in stage %s: run the cutover first, or pass --force to compare anyway "+
-					"(rows that s1 is still writing will show up as differences)", state.Stage)
-			}
-			if dropSlot && rehearsal {
-				return fmt.Errorf("--drop-slot is only allowed in stage %s or %s, the migration is in stage %s", meta.StageVerify, meta.StageDone, state.Stage)
 			}
 
-			v := &verify.Verifier{Cfg: env.cfg, Src: src, Dst: dst, Logger: env.logger}
-			report, err := v.Run(ctx, store)
+			res, err := verify.RunStage(ctx, env.cfg, env.logger, env.out, opts)
 			if err != nil {
 				return err
 			}
-			report.Print(env.out)
-			if report.Failed() {
-				return errors.New("the verification found differences between s1 and s3")
-			}
-			if rehearsal {
-				return nil
-			}
-			if !dropSlot {
+			if !res.Rehearsal && !res.Dropped {
 				fmt.Fprintf(env.out, "\nSwitch the application to s3 now. Afterwards release the WAL that s1 keeps for the slot:\n"+
 					"  gophant verify --drop-slot -c %s\n", o.configPath)
-				return nil
 			}
-			if err := snapshot.DropSlot(ctx, src, env.cfg.Source.SlotName, env.logger); err != nil {
-				return err
-			}
-			if err := store.SetStage(ctx, dst, meta.StageDone); err != nil {
-				return err
-			}
-			fmt.Fprintf(env.out, "\nThe replication slot %s was dropped and the migration is DONE.\n", env.cfg.Source.SlotName)
 			return nil
 		},
 	}

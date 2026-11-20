@@ -13,7 +13,10 @@ gophant sync      -c gophant.yaml    # replay the WAL stream
 gophant cutover   -c gophant.yaml    # lag 0, sequences (writes to s1 stopped first)
 gophant verify    -c gophant.yaml    # row counts and chunk hashes, --drop-slot to finish
 gophant status    -c gophant.yaml    # stage, lag, progress at any time
+gophant run       -c gophant.yaml    # many databases: precheck, snapshot and sync of all of them
 ```
+
+A cluster with many databases needs no configuration per database: with `databases.auto: true` gophant finds the databases of s1, checks them together, creates what is missing (the databases on s3, the publications on s1 when the role may), and every command works on all of them (`--database <name>` limits it). See [docs/multi_database.md](docs/multi_database.md).
 
 Build: `make build` (Go and GNU make; the binary has no CGo dependency). Test: `make test`, and `make e2e` with Docker.
 
@@ -36,6 +39,8 @@ Start with the runbook [docs/operations.md](docs/operations.md). The index of al
 gophant 把 PostgreSQL 16 数据库（s1）迁移到 PostgreSQL 18（s3），割接窗口很短，数据不丢。它用并发的二进制 `COPY` 拷贝一致性快照，exactly-once 地回放逻辑 WAL 流（`pgoutput`）直到割接，并校验结果。
 
 五个阶段各对应一条命令，命令与英文版相同，见上面的代码块。
+
+有很多数据库的集群不需要每个库一份配置：设置 `databases.auto: true` 后，gophant 会发现 s1 上的数据库，把它们放在一起检查，创建缺少的东西（s3 上的库；角色有权限时还有 s1 上的 publication），所有命令都对全部库工作（`--database <name>` 可限定范围）。见 [docs/multi_database.md](docs/multi_database.md)。
 
 构建：`make build`（需要 Go 和 GNU make；二进制不依赖 CGo）。测试：`make test`，有 Docker 时用 `make e2e`。
 

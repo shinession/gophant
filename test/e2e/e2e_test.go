@@ -104,17 +104,26 @@ func mustGophant(t *testing.T, args ...string) string {
 	return out
 }
 
+// connect opens a connection to a container. It retries for up to 30 seconds: the health check of the
+// image can pass while the server is still in its initialization phase, and the first connection from
+// the host then ends with "unexpected EOF".
 func connect(t *testing.T, port string) *pgx.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dsn := fmt.Sprintf("postgres://postgres:%s@127.0.0.1:%s/appdb?sslmode=disable", password(), port)
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect to port %s: %v", port, err)
+	for {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err == nil {
+			t.Cleanup(func() { _ = conn.Close(context.Background()) })
+			return conn
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("connect to port %s: %v", port, err)
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	t.Cleanup(func() { _ = conn.Close(context.Background()) })
-	return conn
 }
 
 func exec1(t *testing.T, conn *pgx.Conn, sql string, args ...any) {

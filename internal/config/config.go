@@ -25,15 +25,16 @@ const (
 
 // Config is the root of the gophant YAML configuration file.
 type Config struct {
-	Source   Source   `yaml:"source"`
-	Target   Target   `yaml:"target"`
-	Tools    Tools    `yaml:"tools"`
-	Filter   Filter   `yaml:"filter"`
-	Precheck Precheck `yaml:"precheck"`
-	Snapshot Snapshot `yaml:"snapshot"`
-	CDC      CDC      `yaml:"cdc"`
-	Cutover  Cutover  `yaml:"cutover"`
-	Verify   Verify   `yaml:"verify"`
+	Source    Source    `yaml:"source"`
+	Target    Target    `yaml:"target"`
+	Databases Databases `yaml:"databases"`
+	Tools     Tools     `yaml:"tools"`
+	Filter    Filter    `yaml:"filter"`
+	Precheck  Precheck  `yaml:"precheck"`
+	Snapshot  Snapshot  `yaml:"snapshot"`
+	CDC       CDC       `yaml:"cdc"`
+	Cutover   Cutover   `yaml:"cutover"`
+	Verify    Verify    `yaml:"verify"`
 }
 
 // Source describes the PostgreSQL 16 source database (s1).
@@ -52,6 +53,53 @@ type Target struct {
 	DSN        string `yaml:"dsn"`
 	MetaSchema string `yaml:"meta_schema"`
 }
+
+// Databases switches gophant from one pair of databases to every database of the cluster.
+//
+// With Auto set, the databases are found on s1 and each one is migrated like a configuration of its
+// own: the same settings, the database name taken from the discovery, a replication slot named after
+// the database. The database named in source.dsn and target.dsn is then only the one gophant
+// connects to first (use postgres); the filter, snapshot, cdc, cutover and verify settings apply to
+// every database.
+type Databases struct {
+	// Auto turns the multi-database mode on.
+	Auto bool `yaml:"auto"`
+	// Include lists the databases to migrate: exact names or patterns with * and ?. Empty means every
+	// database that was found.
+	Include []string `yaml:"include"`
+	// Exclude lists the databases that are never migrated; it wins over Include.
+	Exclude []string `yaml:"exclude"`
+	// Parallel is the number of databases whose snapshot runs at the same time.
+	Parallel int `yaml:"parallel"`
+	// CreateTarget creates a database that s3 does not have yet. It defaults to true.
+	CreateTarget *bool `yaml:"create_target"`
+	// CreatePublication creates the publication in a database of s1 that does not have it, when the
+	// source role is a superuser. It defaults to true.
+	CreatePublication *bool `yaml:"create_publication"`
+
+	include []*regexp.Regexp
+	exclude []*regexp.Regexp
+}
+
+// CreatesTarget reports whether a missing database of s3 is created by gophant.
+func (d *Databases) CreatesTarget() bool { return d.CreateTarget == nil || *d.CreateTarget }
+
+// CreatesPublication reports whether a missing publication of s1 is created by gophant.
+func (d *Databases) CreatesPublication() bool {
+	return d.CreatePublication == nil || *d.CreatePublication
+}
+
+// Matches reports whether a database passes include and exclude.
+func (d *Databases) Matches(name string) bool {
+	if slices.ContainsFunc(d.exclude, func(p *regexp.Regexp) bool { return p.MatchString(name) }) {
+		return false
+	}
+	return len(d.include) == 0 || slices.ContainsFunc(d.include, func(p *regexp.Regexp) bool { return p.MatchString(name) })
+}
+
+// maxMultiSlotBase is the longest source.slot_name of the multi-database mode: the name of the
+// database is appended and a slot name has at most 63 characters.
+const maxMultiSlotBase = 40
 
 // Tools locates the external PostgreSQL client binaries (version 18 recommended).
 type Tools struct {
@@ -192,6 +240,9 @@ func (c *Config) ApplyDefaults() {
 	if c.Target.MetaSchema == "" {
 		c.Target.MetaSchema = "gophant_meta"
 	}
+	if c.Databases.Parallel == 0 {
+		c.Databases.Parallel = 1
+	}
 	if c.Tools.PgDumpBin == "" {
 		c.Tools.PgDumpBin = "pg_dump"
 	}
@@ -255,6 +306,24 @@ func (c *Config) Validate() error {
 	}
 	if !identPattern.MatchString(c.Target.MetaSchema) {
 		add("target.meta_schema %q is invalid: use letters, digits, underscores or $, not starting with a digit", c.Target.MetaSchema)
+	}
+
+	if c.Databases.Parallel < 1 {
+		add("databases.parallel must be >= 1")
+	}
+	include, err := compileDatabasePatterns("databases.include", c.Databases.Include)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Databases.include = include
+	exclude, err := compileDatabasePatterns("databases.exclude", c.Databases.Exclude)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Databases.exclude = exclude
+	if c.Databases.Auto && len(c.Source.SlotName) > maxMultiSlotBase {
+		add("source.slot_name %q is too long for databases.auto: the name of the database is appended, use at most %d characters",
+			c.Source.SlotName, maxMultiSlotBase)
 	}
 
 	for _, s := range c.Filter.IncludeSchemas {
@@ -349,6 +418,20 @@ func compileTablePatterns(patterns []string) ([]tablePattern, error) {
 			continue
 		}
 		out = append(out, tablePattern{schema: globToRegexp(schemaPart), table: globToRegexp(tablePart)})
+	}
+	return out, errors.Join(errs...)
+}
+
+// compileDatabasePatterns compiles the include or exclude list of the databases section.
+func compileDatabasePatterns(key string, patterns []string) ([]*regexp.Regexp, error) {
+	var out []*regexp.Regexp
+	var errs []error
+	for _, p := range patterns {
+		if p == "" {
+			errs = append(errs, fmt.Errorf("%s has an empty entry: use a database name or a pattern with * and ?", key))
+			continue
+		}
+		out = append(out, globToRegexp(p))
 	}
 	return out, errors.Join(errs...)
 }

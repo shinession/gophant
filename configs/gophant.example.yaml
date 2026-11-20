@@ -18,6 +18,23 @@ target:
   dsn: "postgres://postgres:${S3_PASSWORD}@s3-host:5432/appdb?sslmode=prefer"
   meta_schema: "gophant_meta"
 
+# Many databases at once, see docs/multi_database.md. With auto: true gophant finds the databases of s1
+# and migrates all of them, and the other sections apply to each one. source.dsn and target.dsn then
+# only name the database to connect to first (use postgres), source.slot_name becomes the prefix of the
+# slot of every database (at most 40 characters), and "gophant run" does precheck, snapshot and sync.
+databases:
+  auto: false
+  # Databases to migrate and never to migrate: names or patterns with * and ?. Empty include means every
+  # database that was found; exclude wins.
+  include: []
+  exclude: []
+  # Databases whose snapshot (and verify) runs at the same time.
+  parallel: 1
+  # Create a database that s3 does not have, and a publication that s1 does not have (the source role
+  # has to be a superuser for the second).
+  create_target: true
+  create_publication: true
+
 tools:
   # PostgreSQL 18 client tools (pg_dump 18 can dump a PostgreSQL 16 server).
   pg_dump_bin: "/usr/lib/postgresql/18/bin/pg_dump"

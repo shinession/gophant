@@ -14,7 +14,7 @@ func TestRootRegistersEveryStage(t *testing.T) {
 	for _, c := range root.Commands() {
 		got[c.Name()] = true
 	}
-	for _, want := range []string{"precheck", "snapshot", "sync", "cutover", "verify", "status"} {
+	for _, want := range []string{"precheck", "snapshot", "sync", "cutover", "verify", "status", "run"} {
 		if !got[want] {
 			t.Errorf("subcommand %q is not registered", want)
 		}
@@ -28,6 +28,7 @@ func TestStageFlags(t *testing.T) {
 		"cutover":  {"yes"},
 		"verify":   {"drop-slot", "force"},
 		"status":   {"json"},
+		"run":      {"yes"},
 	}
 	for name, flags := range cases {
 		cmd, _, err := root.Find([]string{name})
@@ -42,6 +43,61 @@ func TestStageFlags(t *testing.T) {
 	}
 	if root.PersistentFlags().Lookup("config") == nil || root.PersistentFlags().ShorthandLookup("c") == nil {
 		t.Error("the persistent -c/--config flag is missing")
+	}
+	if root.PersistentFlags().Lookup("database") == nil || root.PersistentFlags().ShorthandLookup("d") == nil {
+		t.Error("the persistent -d/--database flag is missing")
+	}
+}
+
+// writeConfig writes a configuration file for a command that fails before it connects anywhere.
+func writeConfig(t *testing.T, extra string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gophant.yaml")
+	body := "source:\n  dsn: \"postgres://u:p@127.0.0.1:1/postgres\"\ntarget:\n  dsn: \"postgres://u:p@127.0.0.1:1/postgres\"\n" + extra
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// --database selects among the databases that were found, so it means nothing for a single database.
+func TestDatabaseFlagNeedsTheMultiDatabaseMode(t *testing.T) {
+	cfg := writeConfig(t, "")
+	for _, stage := range []string{"precheck", "snapshot", "sync", "cutover", "verify", "status"} {
+		root := NewRootCommand("test", &bytes.Buffer{}, &bytes.Buffer{})
+		root.SetArgs([]string{stage, "-c", cfg, "-d", "crm"})
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "databases.auto") {
+			t.Errorf("%s -d crm without databases.auto: expected an error that names databases.auto, got %v", stage, err)
+		}
+	}
+}
+
+func TestRunNeedsTheMultiDatabaseMode(t *testing.T) {
+	root := NewRootCommand("test", &bytes.Buffer{}, &bytes.Buffer{})
+	root.SetArgs([]string{"run", "-c", writeConfig(t, "")})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "databases.auto") {
+		t.Fatalf("expected an error that names databases.auto, got %v", err)
+	}
+}
+
+// With databases.auto the command goes to s1 to find the databases; this one cannot be reached, which
+// proves that the multi-database path is taken, and the password must not show up in the error.
+func TestMultiDatabaseModeConnectsFirst(t *testing.T) {
+	cfg := writeConfig(t, "databases:\n  auto: true\n")
+	stages := map[string][]string{
+		"precheck": nil, "snapshot": {"--yes"}, "sync": nil, "cutover": {"--yes"}, "verify": nil, "status": nil, "run": {"--yes"},
+	}
+	for stage, flags := range stages {
+		root := NewRootCommand("test", &bytes.Buffer{}, &bytes.Buffer{})
+		root.SetArgs(append([]string{stage, "-c", cfg}, flags...))
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "source:") {
+			t.Errorf("%s: expected a connection error from the source, got %v", stage, err)
+			continue
+		}
+		if strings.Contains(err.Error(), ":p@") {
+			t.Errorf("%s: the error leaks the password: %v", stage, err)
+		}
 	}
 }
 

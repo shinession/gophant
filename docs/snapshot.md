@@ -7,7 +7,7 @@
 ### Flow
 
 1. Read the migration state from s3 and decide: fresh start, `--restart`, or continue a finished copy whose post-data import failed. An unfinished or finished snapshot without `--restart` is refused.
-2. Run the precheck; any FAIL stops here.
+2. Run the precheck; any FAIL stops here. The multi-database mode ([multi_database.md](multi_database.md)) has already checked all databases together and starts the stage with `Options.SkipPrecheck`, so this step is left out for them.
 3. Create the meta schema and the state row; read the plan from s1 (tables, columns, column types).
 4. `pg_dump --schema-only --format=custom` into a temporary archive, then `pg_restore --section=pre-data` in one transaction. A `CREATE SCHEMA` of a schema that s3 already has is removed from the restore list (the archive of `--schema=public` contains `CREATE SCHEMA public`). Skipped with `snapshot.skip_ddl`.
 5. Register every table in `table_progress` as `PENDING`.
@@ -59,7 +59,7 @@ Existing post-data objects are skipped by removing their entries from the `pg_re
 ### 流程
 
 1. 从 s3 读取迁移状态并决定：全新开始、`--restart`，或继续一个已拷贝完成但 post-data 导入失败的快照。没有 `--restart` 时，未完成或已完成的快照会被拒绝。
-2. 运行 precheck；有 FAIL 就在这里停止。
+2. 运行 precheck；有 FAIL 就在这里停止。多库模式（[multi_database.md](multi_database.md)）已经把所有库放在一起检查过，并用 `Options.SkipPrecheck` 启动该阶段，所以对这些库会跳过这一步。
 3. 创建 meta schema 和状态行；从 s1 读取计划（表、列、列类型）。
 4. `pg_dump --schema-only --format=custom` 导出到临时归档，再用 `pg_restore --section=pre-data` 在一个事务中恢复。s3 已有的 schema 的 `CREATE SCHEMA` 会从恢复列表中去掉（显式 `--schema=public` 的归档包含 `CREATE SCHEMA public`）。设置 `snapshot.skip_ddl` 时跳过。
 5. 把每张表登记到 `table_progress`，状态为 `PENDING`。
