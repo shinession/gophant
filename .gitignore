@@ -1,0 +1,32 @@
+# Build output
+/dist/
+/release/
+/bin/
+*.exe
+*.zip
+
+# Local configuration (host specific, may hold secrets). Only the *.example.json templates are tracked.
+/config/*
+!/config/*.example.json
+
+# Local gophant configuration (host specific, may hold secrets). Only the *.example.yaml templates are tracked.
+/configs/*
+!/configs/*.example.yaml
+
+# Runtime data and logs
+/data/
+/logs/
+*.log
+
+# Go test artifacts
+*.test
+*.out
+coverage.*
+
+# Editors and OS
+.vscode/
+.idea/
+.history/
+*.swp
+Thumbs.db
+.DS_Store

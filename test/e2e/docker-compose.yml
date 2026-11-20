@@ -1,0 +1,52 @@
+# End-to-end test environment: PostgreSQL 16 (s1, source) and PostgreSQL 18 (s3, target).
+#
+# Both containers listen on 127.0.0.1 only. The password comes from GOPHANT_E2E_PASSWORD: the end-to-end
+# test generates a random one for every run; set it yourself when you start the containers by hand.
+#
+# The gophant binary (built for linux/amd64 into ../../bin) is mounted into s3, which also carries the
+# PostgreSQL 18 pg_dump/pg_restore that gophant needs, so the tool runs next to the target.
+name: gophant-e2e
+
+services:
+  s1:
+    image: postgres:16
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=8
+      - -c
+      - max_wal_senders=8
+      - -c
+      - max_slot_wal_keep_size=2GB
+      - -c
+      - wal_sender_timeout=60s
+    environment:
+      POSTGRES_PASSWORD: ${GOPHANT_E2E_PASSWORD:?set GOPHANT_E2E_PASSWORD}
+      POSTGRES_DB: appdb
+    ports:
+      - "127.0.0.1:55416:5432"
+    volumes:
+      - ./init-s1.sh:/docker-entrypoint-initdb.d/10-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  s3:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: ${GOPHANT_E2E_PASSWORD:?set GOPHANT_E2E_PASSWORD}
+      POSTGRES_DB: appdb
+    ports:
+      - "127.0.0.1:55418:5432"
+    volumes:
+      - ../../bin:/gophant:ro
+      - ./:/e2e:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

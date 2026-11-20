@@ -1,0 +1,58 @@
+# gophant example configuration / gophant 配置模板
+#
+# Copy this file to a local, untracked path and adjust it. Any ${NAME} reference inside a string
+# value is replaced by the environment variable NAME, so passwords do not have to be written here.
+# 复制本文件到本地（不纳入版本库）后修改。字符串中的 ${NAME} 会被替换为环境变量 NAME，
+# 因此密码不必写进文件。
+
+source:
+  # Regular SQL connection to s1 (PostgreSQL 16).
+  dsn: "postgres://gophant_repl:${S1_PASSWORD}@s1-host:5432/appdb?sslmode=prefer"
+  # Replication connection. Optional: when omitted, dsn is used with replication=database added.
+  replication_dsn: "postgres://gophant_repl:${S1_PASSWORD}@s1-host:5432/appdb?replication=database"
+  slot_name: "gophant_slot"
+  publication_name: "gophant_pub"
+
+target:
+  # Connection to s3 (PostgreSQL 18). The role must be allowed to SET session_replication_role.
+  dsn: "postgres://postgres:${S3_PASSWORD}@s3-host:5432/appdb?sslmode=prefer"
+  meta_schema: "gophant_meta"
+
+tools:
+  # PostgreSQL 18 client tools (pg_dump 18 can dump a PostgreSQL 16 server).
+  pg_dump_bin: "/usr/lib/postgresql/18/bin/pg_dump"
+  pg_restore_bin: "/usr/lib/postgresql/18/bin/pg_restore"
+
+filter:
+  # Empty include_schemas means every non-system schema.
+  include_schemas: ["public"]
+  # Schema-qualified patterns, wildcards * and ? allowed, e.g. "public.audit_*".
+  exclude_tables: []
+
+precheck:
+  # Downgrade "max_slot_wal_keep_size must be > 0" from FAIL to WARN. Leave false in production.
+  allow_unlimited_slot_wal: false
+
+snapshot:
+  # Number of tables copied concurrently.
+  workers: 4
+  # true: do not run pg_dump/pg_restore; the schema on s3 is prepared manually.
+  skip_ddl: false
+
+cdc:
+  standby_status_interval: "5s"
+  batch_max_txns: 50
+  batch_max_delay: "200ms"
+  # A single transaction larger than this is spilled to temp_dir to avoid out-of-memory.
+  max_tx_memory_mb: 64
+  temp_dir: "/tmp/gophant-spill"
+
+cutover:
+  sequence_offset: 100
+  lag_zero_timeout: "5m"
+
+verify:
+  workers: 4
+  chunk_size: 50000
+  mode: "count_and_sample" # count_only | count_and_sample | full_hash
+  sample_ratio: 0.1
